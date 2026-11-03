@@ -23,7 +23,11 @@
 #define CONFIG_ESP_SDR_UART_BAUD 2000000
 #endif
 
-#define COMMAND_SIZE 128
+/* The longest protocol line is "SPEC 0 1 1 1 5 2048" (21 chars), so 80 bytes leave
+ * ample room while keeping the per-port line buffers small: the C5 keeps everything
+ * up to 0x40820000 clear for the RF dump, and that guard is only a few hundred bytes
+ * away from the end of BSS. */
+#define COMMAND_SIZE 80
 static burst_serial_port_t active_port = BURST_SERIAL_USB;
 static unsigned next_port;
 static unsigned uart_baud = CONFIG_ESP_SDR_UART_BAUD;
