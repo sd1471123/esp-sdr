@@ -1,4 +1,6 @@
+#include "burst_beep.h"
 #include "burst_gpio.h"
+#include "burst_led.h"
 #include "burst_serial.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -50,6 +52,9 @@ static uint64_t excluded_pins(void) {
 #if CONFIG_ESP_SDR_UART_ENABLED
     mask |= PIN(CONFIG_ESP_SDR_UART_TX_PIN) | PIN(CONFIG_ESP_SDR_UART_RX_PIN);
 #endif
+    /* The status LED's line belongs to the RMT peripheral, not to GPIO control. */
+    const int led_pin = burst_led_owned_pin();
+    if (led_pin >= 0) mask |= PIN(led_pin);
     return mask;
 }
 
@@ -106,6 +111,11 @@ bool burst_gpio_command(const char *line) {
     snprintf(canonical, sizeof(canonical), "GPIO %u %c", pin, state);
     if (strcmp(line, canonical)) {
         reply("ERR gpio_args\n");
+        return true;
+    }
+    /* The buzzer drives its pin through RMT while it is sounding. */
+    if ((int)pin == burst_beep_owned_pin()) {
+        reply("ERR gpio_busy\n");
         return true;
     }
     /* Preload the latch before enabling output, avoiding a low pulse when

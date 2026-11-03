@@ -1,6 +1,8 @@
 /* The burst protocol is shared by native USB Serial/JTAG and UART0. */
 #include "burst_serial.h"
+#include "burst_beep.h"
 #include "burst_gpio.h"
+#include "burst_led.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -100,6 +102,8 @@ void burst_serial_init(void) {
     ESP_ERROR_CHECK(uart_flush_input(UART_NUM_0));
 #endif
     burst_gpio_init();
+    burst_led_init();
+    burst_beep_init();
 }
 
 burst_serial_port_t burst_serial_port(void) {

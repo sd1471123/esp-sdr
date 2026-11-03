@@ -54,4 +54,17 @@ menu "ESP-SDR transport"
         default 12 if IDF_TARGET_ESP32C5
         default 44
 
+    config ESP_SDR_LED_PIN
+        int "Status RGB LED GPIO (-1 disables)"
+        range -1 48 if !IDF_TARGET_ESP32S31 && !IDF_TARGET_ESP32C2
+        range -1 20 if IDF_TARGET_ESP32C2
+        range -1 63 if IDF_TARGET_ESP32S31
+        default 27 if IDF_TARGET_ESP32C5
+        default -1
+        help
+            GPIO wired to the on-board addressable (WS2812 class) RGB LED, driven
+            with an RMT channel because the protocol lives in the pulse widths.
+            The pin is then removed from the GPIO command's pool. -1 disables the
+            LED support; the ESP32-C5-DevKitC-1 puts its RGB LED on GPIO27.
+
 endmenu

@@ -25,7 +25,9 @@
 #endif
 #include "chip.h"
 #include "burst_serial.h"
+#include "burst_beep.h"
 #include "burst_gpio.h"
+#include "burst_led.h"
 #include "burst_version.h"
 #include "spectrum.h"
 #if CONFIG_IDF_TARGET_ESP32C61 || CONFIG_IDF_TARGET_ESP32C6
@@ -310,6 +312,8 @@ void app_main(void) {
 static void handle_command(char *line) {
     if (burst_version_command(line)) return;
     if (burst_gpio_command(line)) return;
+    if (burst_led_command(line)) return;
+    if (burst_beep_command(line)) return;
 #ifdef RING_PROBE
     if (ring_probe_command(line)) return;
 #endif
@@ -330,6 +334,10 @@ static void handle_command(char *line) {
         reply(
             "CAPS VERSION GPIO SPEC SPECN SPECCAPS SPECSTAT DCT UARTBAUD RXLIMITS GAIN HWAGC IQ8 SERIALLEASE"
             " TUNEEXT"
+#if CONFIG_ESP_SDR_LED_PIN >= 0
+            " LED"
+#endif
+            " BEEP"
 #if CONFIG_IDF_TARGET_ESP32C6
             " RX40 RX16"
 #else
