@@ -209,7 +209,10 @@ report the configured drive state, not the measured voltage at the pad.
 
 Availability excludes input-only/nonexistent GPIOs, dedicated flash/PSRAM and
 memory-supply pads (conservatively including optional memory), ESP-IDF-reserved
-pins, native USB pins, and both UART pins when the UART transport is enabled.
+pins, native USB pins, both UART pins when the UART transport is enabled, and the
+status LED pin when `CONFIG_ESP_SDR_LED_PIN` sets one. A pin that a sounding
+buzzer drives through RMT stays listed but rejects writes with `ERR gpio_busy`;
+see [Status LED and buzzer](protocol.md#status-led-and-buzzer).
 Pin numbers are silicon GPIO numbers, not board connector labels. Firmware
 cannot discover board wiring or which pads a particular module exposes.
 
