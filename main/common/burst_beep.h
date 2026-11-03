@@ -18,3 +18,8 @@ bool burst_beep_command(const char *line);
 
 /* Pin currently driven by the buzzer, or -1 when silent. */
 int burst_beep_owned_pin(void);
+
+/* Stop a sounding tone, if any. The serial layer calls this when the client
+ * releases the receiver or loses its lease, so a vanished client cannot leave
+ * the buzzer running. Silent when nothing is sounding. */
+void burst_beep_silence(void);

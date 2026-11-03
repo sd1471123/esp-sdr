@@ -95,6 +95,11 @@ int burst_beep_owned_pin(void) {
     return beep_duty > 0 ? beep_pin : -1;
 }
 
+void burst_beep_silence(void) {
+    /* beep_stop() is idempotent: it only releases what it owns. */
+    beep_stop();
+}
+
 bool burst_beep_command(const char *line) {
     if (!strcmp(line, "BEEP?")) {
         char answer[48];

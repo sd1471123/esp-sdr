@@ -260,7 +260,13 @@ void burst_serial_serve(void (*handle)(char *line)) {
     int owner = -1;
     int64_t lease_deadline = 0;
     for (;;) {
-        if (esp_timer_get_time() >= lease_deadline) owner = -1;
+        /* A lost lease silences the buzzer, so a tone cannot outlive the client
+         * that asked for it. The LED keeps its colour: it is a status indicator,
+         * not part of the transaction. */
+        if (owner >= 0 && esp_timer_get_time() >= lease_deadline) {
+            owner = -1;
+            burst_beep_silence();
+        }
         int status = burst_serial_poll_line(line, sizeof(line));
         if (!status) {
             vTaskDelay(1);
@@ -279,6 +285,7 @@ void burst_serial_serve(void (*handle)(char *line)) {
         if (!strcmp(line, "RELEASE")) {
             serve_reply("OK\n");
             owner = -1;
+            burst_beep_silence();
         } else {
             handle(line);
         }
