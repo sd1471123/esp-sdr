@@ -10,13 +10,39 @@
 #include <string.h>
 
 #define LCD_SPI_HOST SPI2_HOST
-#define LCD_SPI_HZ   40000000
 #define STAGE_PIXELS 512
+
+/* Bring-up knobs. A 320x240 panel on 15 cm dupont wires rarely survives
+ * 40 MHz: the data lines ring and the panel latches shifted pixels, which
+ * looks like random colour noise. 20 MHz is the safe default; raise it once
+ * the picture is stable. */
+#ifndef LCD_SPI_HZ
+#define LCD_SPI_HZ 20000000
+#endif
+
+/* Visible-area offset inside the controller GRAM. 320x240 panels normally
+ * need 0/0, but 240x240 square panels sit at y=80 and some 2.0" modules at
+ * x=0/y=0 with MADCTL 0x60. If the image is shifted by a constant amount or
+ * wrapped, change these two instead of touching the drawing code. */
+#ifndef LCD_OFS_X
+#define LCD_OFS_X 0
+#endif
+#ifndef LCD_OFS_Y
+#define LCD_OFS_Y 0
+#endif
+
+/* Paint solid bars and a 1 px frame right after init so a wiring fault can be
+ * told apart from a drawing fault. Set to 0 for a silent boot. */
+#ifndef LCD_SELFTEST
+#define LCD_SELFTEST 1
+#endif
 
 static spi_device_handle_t lcd_spi;
 static uint16_t *stage;
 static unsigned lcd_w = 320, lcd_h = 240;
 static bool landscape = true;
+
+static void lcd_selftest(void);
 
 static void lcd_cmd(uint8_t cmd, const uint8_t *data, size_t len) {
     gpio_set_level(LCD_PIN_DC, 0);
@@ -102,6 +128,9 @@ bool lcd_init(void) {
     lcd_cmd1(0x29, 0x00); /* display on */
     esp_rom_delay_us(20000);
     gpio_set_level(LCD_PIN_BL, 1);
+#if LCD_SELFTEST
+    lcd_selftest();
+#endif
     return true;
 }
 
@@ -127,6 +156,8 @@ uint16_t lcd_rgb565(uint8_t r, uint8_t g, uint8_t b) {
 
 void lcd_set_window(unsigned x, unsigned y, unsigned w, unsigned h) {
     if (!w || !h) return;
+    x += LCD_OFS_X;
+    y += LCD_OFS_Y;
     unsigned x1 = x + w - 1, y1 = y + h - 1;
     uint8_t cols[] = {x >> 8, x, x1 >> 8, x1};
     uint8_t rows[] = {y >> 8, y, y1 >> 8, y1};
@@ -183,3 +214,29 @@ void lcd_draw_bitmap2(unsigned x, unsigned y, unsigned w, unsigned h, const uint
         spi_device_polling_transmit(lcd_spi, &t);
     }
 }
+
+#if LCD_SELFTEST
+/* Solid bars first, then a 1 px frame with a checkerboard. If the frame hugs
+ * all four edges the bus, the window and MADCTL agree with the panel; a torn
+ * or wrapped frame points at the resolution offset, and speckle inside a solid
+ * bar points at the SPI clock or a floating data line. */
+static void lcd_selftest(void) {
+    static const uint16_t bars[] = {0xf800, 0x07e0, 0x001f, 0xffff, 0x0000};
+    for (unsigned i = 0; i < sizeof(bars) / sizeof(bars[0]); i++) {
+        lcd_fill(bars[i]);
+        esp_rom_delay_us(250000);
+    }
+    lcd_fill(0x0000);
+    lcd_fill_rect(0, 0, lcd_w, 1, 0xffff);
+    lcd_fill_rect(0, lcd_h - 1, lcd_w, 1, 0xffff);
+    lcd_fill_rect(0, 0, 1, lcd_h, 0xffff);
+    lcd_fill_rect(lcd_w - 1, 0, 1, lcd_h, 0xffff);
+    for (unsigned y = 0; y < lcd_h; y += 16) {
+        for (unsigned x = 0; x < lcd_w; x += 16) {
+            if (((x >> 4) + (y >> 4)) & 1) lcd_fill_rect(x, y, 16, 16, 0xffff);
+        }
+    }
+    esp_rom_delay_us(800000);
+    lcd_fill(0x0000);
+}
+#endif
