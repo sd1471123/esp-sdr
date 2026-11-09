@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-C5 SDR · ST7789 本地面板仿真</title>
+<style>
+  :root {
+    --bg: #0a0d11;
+    --panel: #141a21;
+    --line: rgba(255,255,255,0.10);
+    --text: #e8edf4;
+    --muted: #8a94a6;
+    --accent: #00ff66;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; justify-content: center; padding: 32px 20px 48px;
+  }
+  .wrap { width: 100%; max-width: 1080px; }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 22px; align-items: start; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+
+  .device { background: #1b2129; border: 1px solid var(--line); border-radius: 18px; padding: 14px; }
+  .device-top, .device-bottom {
+    display: flex; justify-content: space-between; color: var(--muted);
+    font: 11px/1.4 ui-monospace, "SFMono-Regular", monospace; padding: 0 4px;
+  }
+  .device-top { margin-bottom: 10px; }
+  .device-bottom { margin-top: 10px; }
+  .screen {
+    display: block; width: 100%; height: auto; background: #000; border-radius: 4px;
+    image-rendering: pixelated; image-rendering: crisp-edges;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.06), inset 0 0 24px rgba(0,0,0,0.6);
+  }
+  .keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 12px; }
+  .key {
+    background: #232b34; color: var(--text); border: 1px solid var(--line); border-radius: 9px;
+    padding: 8px 4px 7px; cursor: pointer; user-select: none; -webkit-user-select: none;
+    font: 600 11px/1.2 ui-monospace, "SFMono-Regular", monospace; text-align: center;
+  }
+  .key small { display: block; color: var(--muted); font-weight: 400; font-size: 10px; margin-top: 3px; }
+  .key.active, .key:active { background: #2f3a46; border-color: #4a5866; }
+
+  aside { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+  .kv { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px dashed rgba(255,255,255,0.06); }
+  .kv:last-child { border-bottom: 0; }
+  .kv b { font-family: ui-monospace, monospace; font-weight: 600; }
+  .host { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .host label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  input[type=range] { width: 100%; margin: 10px 0 4px; accent-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 14px; line-height: 1.7; }
+  kbd { background: #232b34; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font: 11px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ESP32-C5 SDR · ST7789 本地面板仿真</h1>
+  <p class="sub">按 <code>main/local_ui/ui.c</code> 逐像素重绘：256 bin 频谱、峰值保持、瀑布、信道条与五个按键的行为均与固件一致。</p>
+
+  <div class="layout">
+    <div class="device">
+      <div class="device-top"><span>ESP32-C5 · 2.4 / 5 GHz</span><span id="orientLabel">320 × 240 · ST7789</span></div>
+      <canvas id="lcd" class="screen" width="320" height="240"></canvas>
+      <div class="device-bottom"><span id="hostLabel">BURST HOST: IDLE</span><span>GPIO 6/7/8/9/10 · 按键 2/3/4/5/24</span></div>
+      <div class="keys">
+        <button class="key" data-key="left">LEFT<small>◀ 信道</small></button>
+        <button class="key" data-key="mode">MODE<small>SWEEP/LIVE</small></button>
+        <button class="key" data-key="band">BAND<small>2.4G/5G</small></button>
+        <button class="key" data-key="rot">ROT<small>旋转/长按复位</small></button>
+        <button class="key" data-key="right">RIGHT<small>信道 ▶</small></button>
+      </div>
+    </div>
+
+    <aside>
+      <h2>状态</h2>
+      <div class="kv"><span>频段</span><b id="stBand">5G</b></div>
+      <div class="kv"><span>信道</span><b id="stChan">CH36 · 5180 MHz</b></div>
+      <div class="kv"><span>模式</span><b id="stMode">SWEEP</b></div>
+      <div class="kv"><span>量程</span><b id="stRange">-26 / -105 dB</b></div>
+      <div class="kv"><span>方向</span><b id="stRot">横屏</b></div>
+      <div class="kv"><span>静音</span><b id="stMute">否</b></div>
+
+      <div class="host">
+        <label><input type="checkbox" id="hostToggle"> 模拟上位机接管</label>
+        <input type="range" id="hostFreq" min="2400" max="5900" step="5" value="5280" disabled>
+        <div class="kv"><span>主机频率</span><b id="stHostFreq">5280 MHz</b></div>
+      </div>
+
+      <p class="hint">
+        <kbd>←</kbd><kbd>→</kbd> 信道 · <kbd>B</kbd> 频段 · <kbd>M</kbd> 模式 · <kbd>R</kbd> 旋转<br>
+        按住 <kbd>B</kbd>/<kbd>M</kbd> 再按方向键：调上限/下限<br>
+        左右同按：静音 · 长按 <kbd>R</kbd> 5 s：恢复默认<br>
+        默认 5G、SWEEP、横屏、-26/-105 dB，与固件一致。
+      </p>
+    </aside>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ---- 点阵字库（与 font5x7.c / font7x12.c 相同） ---- */
+const F5 = Uint8Array.from(atob("AAAAAAAAAAQEBAQABAAKCgAAAAAAAAgeCg8EAAAOAg4MDgACAQIIFAgABgICFQkOAAQEAAAAAAAEBAQEBAAABAQEBAQAAAQEBAQAAAAABAQPBAQAAAAAAAAEBAAAAA4AAAAAAAAAAAQACAgABAACAAYKDgoKBgAGBAQEBA4ABggIBAIOAA4IBAgIBgAMDAoIDggADgIGCAgGAAwCDgoKDgAOCAAEBAIADgoOCgoOAAYKCg4IBgAAAAQAAAQAAAAEAAAEBAAIAgIIAAAAAA8ADwAAAAAMDAAAAA4IBAQEBAAADAANAQ0CBAYKCg4JAA4ICA4IDgAMAgICAgwABgoKCgoGAA4CAg4CDgAOAgIOAgIADAICCgIMAAoKCg4KCgAOBAQEBA4ADAgICAgGAAgEBgYICAACAgICAg4ACwsPBQEBAAoKDgwICAAGCggICgYADgoKDgICAAYKCAgKDggOCgoGCgoADgIGDAgOAA8EBAQEBAAICAgICg4ACQoKCgYEABERBQ4KCgAICgQECggACQoGBAQEAA4IBAQCDgAEBAQEBAwAAAIABAAICAQEBAQEBgAECgAAAAAAAAAAAAAAAAAAAAAAAAAAAA4OCg4AAgIOCgoOAAAADAICDAAICA4KCg4AAAAODgIOAAQEDgQEBAAAAA4KCg4IAgIOCgoKAAAABgQEDgAAAAYEBAQEAgIKBgoKAAQEBAQEDAAAAA8FBQUAAAAOCgoKAAAADgoKDgAAAA4KCg4CAAAOCgoOCAAADgICAgAAAA4CCA4AAAQOBAQMAAAACgoKDgAAAAgKAgQAAAARBQ4KAAAACgQECgAAAAgKDgQEAAAOAAAOAAQEAgQEDAAEBAQEBAQEBAQMBAQCAAAAAA8AAAA="), c => c.charCodeAt(0));
+const F7 = Uint8Array.from(atob("AAAAAAAAAAAAAAAAGBgYGBgQEAAYGAAAZGRkZAAAAAAAAAAAWEhIfiwkfzYSEgAAEHwWFhx4cFByPBAQDgsLDgAAYBAQYAAAGAQEDBweM2NmfAAAGBgYGAAAAAAAAAAAEBAYGAgIGBgYECAACBgQMDAwMBAYCAwAEFI8PFIQAAAAAAAAABAQEH5+EBAQAAAAAAAAAAAAABgYGAgAAAAAAAA8PAAAAAAAAAAAAAAAABgYGAAAQEAgIDAQGAgMBAQCOGRmRlZWRmZkOAAAGBAQEBAQEBAQfgAAPGJgYGAwGAwGfgAAPGJgYDhgQEBiPAAAcHB4bGZifmBgYAAAfgYGPmBgQGBiHAAAOAQGPmZGRkZkOAAAfmBgMDAwGBgIDAAAOGRGZDxmRkZmPAAAPGZmZmZmfEBgHAAAAAAAGBgYABgYGAAAAAAAGBgYABgYGAgAAAAAcBwGHHAAAAAAAAB+fgAAfn4AAAAAAAACDnhgcA4CAAAAOGBgMBAYGAAYGAAAOEQCckkJCUlyAgR4GDg8LGRkfkZCQwAAPmZGZj5GRkZGPgAAOAwEBgYGBgQMOAAAHmZGRkZGRkZmHgAAfgYGBn4GBgYGfgAAfgYGBn4GBgYGBgAAOAwGBgZmRkZMeAAARkZGRn5GRkZGRgAAfhgYGBgYGBgYfgAAeGBgYGBgYGBgPAAARmY2Hh4+NmZmRgAABAQEBAQEBAQEfAAAZmZuelpaQkJCQgAARkZOTlpScmJiYgAAOGRGRkZGRkZkOAAAPmZGRmY+BgYGBgAAOGRGRkZGRkZkOGAAPmZGZmY+ZmZGRgAAOEYGDjx4YEBiPAAAfhgYGBgYGBgYGAAARkZGRkZGRkZmPAAAQkZGZmRkLDw4OAAAAwMDGlpabm5mZgAARmZsPBgYPGxmQgAAQ0ZmLDgYGBgYGAAAfmBgcDgYHA4GfgAAGBgYGBgYGBgYGDgAAgQEDAgYEDAgIEBAEBAQEBAQEBAQEBwAGDxkQgAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAA4YEB8RkZmfAAABgY2bkZGRkZuNgAAAAA4DAQGBgQMOAAAQEB8ZmZmZmZmfAAAAAA4ZkZ+BgYGOAAAGBh+GBgYGBgYGAAAAAB8ZmZGRmZmfEBgBgY+ZmZmZmZmZgAAEAAcEBAQEBAQfgAAMAA8MDAwMDAwMDAQBgZmNh4ePmZmRgAAGBgYGBgYGBgYcAAAAAB+WlJSUlJSUgAAAAA+ZmZmZmZmZgAAAAA4ZEZGRkZkOAAAAAA2bkZGRkZuNgYGAAB8ZmZmZmZmfEBAAABsHAwMDAwMDAAAAAA8BAY8eGBgOAAAGBh+GBgYGBgYcAAAAABmZmZmZmZmfAAAAABGRmZkLDw4GAAAAAADAxpaWm5mZgAAAABmbDwYODxkRgAAAABGRmZsLDg4GBgYAAB+YHA4GAwOfgAAEBgYGBgOGBgYGBBwEBAQEBAQEBAQEBAQGBgYGBBwEBgYGBgOAAAAAA5+YAAAAAAA"), c => c.charCodeAt(0));
+
+/* ---- 固件常量 ---- */
+const COL_BG = 0x0000, COL_PANEL = 0x18C3, COL_GRID = 0x2945, COL_DIM = 0x8410;
+const COL_TEXT = 0xFFFF, COL_ACCENT = 0x07E0, COL_PEAK = 0xFFE0;
+const COL_USB = 0x07FF, COL_MUTE = 0xF800, COL_CELL = 0x2104;
+
+const FFT_BINS = 256;
+const SWEEP_PERIOD_MS = 80;
+const RENDER_PERIOD_MS = 100;
+const HOST_PERIOD_MS = 500;
+const LONG_PRESS_MS = 5000;
+const REPEAT_DELAY_MS = 400;
+const REPEAT_PERIOD_MS = 200;
+const CHORD_WINDOW_MS = 350;
+
+function rgb565(v) {
+  return [((v >> 11) & 0x1f) * 255 / 31 | 0, ((v >> 5) & 0x3f) * 255 / 63 | 0, (v & 0x1f) * 255 / 31 | 0];
+}
+const C = {
+  bg: rgb565(COL_BG), panel: rgb565(COL_PANEL), grid: rgb565(COL_GRID), dim: rgb565(COL_DIM),
+  text: rgb565(COL_TEXT), accent: rgb565(COL_ACCENT), peak: rgb565(COL_PEAK),
+  usb: rgb565(COL_USB), mute: rgb565(COL_MUTE), cell: rgb565(COL_CELL)
+};
+
+/* ---- 状态（对应 ui_settings_t + ui.c 静态变量） ---- */
+const DEFAULTS = { band: 1, mode: 0, landscape: 1, buzz: 1, top_db: -26, bottom_db: -105 };
+const cfg = { ...DEFAULTS };
+let channel = 0, scan_index = 0;
+let muted = false, usbActive = false;
+let hostFreq = 5280;
+let sel_x = 0;
+let lastStep = 0;
+let acqTick = 0;
+
+const codes = new Uint8Array(FFT_BINS);
+const peak = new Uint8Array(FFT_BINS);
+let haveData = false;
+let pk_db = 0, act_db = 0, det_pct = 0;
+
+/* ---- 画布与布局 ---- */
+const canvas = document.getElementById('lcd');
+const ctx = canvas.getContext('2d');
+let W = 320, H = 240, img = null, data = null;
+const WF_STRIDE = 320, WF_ROWS_MAX = 120;
+const wf = new Uint8Array(WF_STRIDE * WF_ROWS_MAX);
+let wfNext = 0;
+
+function layout() {
+  return cfg.landscape
+    ? { top_h: 22, spec_y: 22, spec_h: 100, wf_y: 122, wf_h: 86, strip_y: 208, strip_h: 32 }
+    : { top_h: 24, spec_y: 24, spec_h: 140, wf_y: 164, wf_h: 120, strip_y: 284, strip_h: 36 };
+}
+let L = layout();
+
+function allocBuffer() {
+  W = cfg.landscape ? 320 : 240;
+  H = cfg.landscape ? 240 : 320;
+  canvas.width = W; canvas.height = H;
+  img = ctx.createImageData(W, H);
+  data = img.data;
+  L = layout();
+}
+
+function setPx(x, y, c) {
+  if (x < 0 || y < 0 || x >= W || y >= H) return;
+  const i = (y * W + x) * 4;
+  data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = 255;
+}
+function fillRect(x, y, w, h, c) {
+  const y0 = Math.max(0, y), y1 = Math.min(H, y + h);
+  const x0 = Math.max(0, x), x1 = Math.min(W, x + w);
+  for (let yy = y0; yy < y1; yy++)
+    for (let xx = x0; xx < x1; xx++) setPx(xx, yy, c);
+}
+
+/* ui_text(): 逐字符位图，1 px 间隔，与固件一致 */
+function text(x, y, s, fg, bg, big) {
+  const font = big ? F7 : F5;
+  const gw = big ? 7 : 5, gh = big ? 12 : 7, cw = gw + 1;
+  if (!s || x >= W || y >= H) return;
+  let len = s.length;
+  while (len && x + len * cw - 1 > W) len--;
+  if (!len) return;
+  s = s.slice(0, len);
+  for (let row = 0; row < gh; row++) {
+    let cx = x;
+    for (let i = 0; i < len; i++) {
+      const ch = s.charCodeAt(i);
+      const bits = (ch >= 32 && ch < 127) ? font[(ch - 32) * gh + row] : 0;
+      for (let col = 0; col < gw; col++) {
+        setPx(cx, y + row, (bits >> col) & 1 ? fg : bg);
+        cx++;
+      }
+      if (i + 1 < len) { setPx(cx, y + row, bg); cx++; }
+    }
+  }
+}
+
+/* ---- 频段表 ---- */
+function bandCount() { return cfg.band === 1 ? 36 : 13; }
+function bandNumber(i) { return cfg.band === 1 ? 36 + i * 4 : i + 1; }
+function bandMhz(i) { return cfg.band === 1 ? 5180 + i * 20 : 2412 + i * 5; }
+function bandLabel() { return cfg.band === 1 ? "5G" : "2.4G"; }
+
+/* ---- 频谱电平映射（ui.c: level_of） ---- */
+function levelOf(code, h) {
+  const db = (code / 2 | 0) - 84;
+  let range = cfg.top_db - cfg.bottom_db;
+  if (range < 5) range = 5;
+  let lv = ((db - cfg.bottom_db) * h / range) | 0;
+  return Math.max(0, Math.min(h, lv));
+}
+function displayBin(x, w) { return ((x * FFT_BINS / w | 0) + FFT_BINS / 2) % FFT_BINS; }
+
+/* ---- 模拟 RF：按信道频率生成稳定的信号 + 每次采集的抖动 ---- */
+function hash32(n) {
+  n = (n | 0) ^ 0x9e3779b9;
+  n = Math.imul(n ^ (n >>> 16), 0x85ebca6b);
+  n = Math.imul(n ^ (n >>> 13), 0xc2b2ae35);
+  return (n ^ (n >>> 16)) >>> 0;
+}
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function makeCodes(mhz, tick, out) {
+  const rnd = mulberry32(hash32(mhz * 7919 + tick * 131));
+  for (let i = 0; i < FFT_BINS; i++) {
+    let v = 5 + 3 * Math.sin(i * 0.21 + tick * 0.05) + 2 * Math.sin(i * 0.053 + 1.1);
+    v += rnd() * 5;
+    out[i] = Math.max(0, Math.min(255, v | 0));
+  }
+  const h = hash32(mhz);
+  const centers = [h % 256, (h >>> 7) % 256, (h >>> 15) % 256, (h >>> 21) % 256];
+  const amps = [58, 96, 40, 26], widths = [2.2, 3.4, 1.6, 4.0];
+  for (let k = 0; k < centers.length; k++) {
+    const c = centers[k], a = amps[k], w = widths[k];
+    for (let d = -10; d <= 10; d++) {
+      const b = (c + d + 256) % 256;
+      out[b] = Math.max(0, Math.min(255, out[b] + a * Math.exp(-(d * d) / (w * w))));
+    }
+  }
+}
+
+/* ---- 固件 analyse() ---- */
+function analyse() {
+  const sorted = Uint8Array.from(codes).sort();
+  const noise = sorted[FFT_BINS / 4];
+  let sum = 0, pk = 0, det = 0;
+  for (let j = 0; j < FFT_BINS; j++) {
+    sum += codes[j];
+    if (codes[j] > pk) pk = codes[j];
+    if (codes[j] > noise + 16) det++;
+  }
+  pk_db = (pk / 2 | 0) - 84;
+  act_db = Math.trunc(((sum / FFT_BINS | 0) - noise) / 2);
+  det_pct = (det * 100 / FFT_BINS) | 0;
+}
+
+function waterfallPush() {
+  const row = wfNext * WF_STRIDE;
+  for (let x = 0; x < W; x++) wf[row + x] = codes[displayBin(x, W)];
+  wfNext = (wfNext + 1) % L.wf_h;
+}
+
+function acquire() {
+  const count = bandCount();
+  if (cfg.mode === 0) { scan_index = (scan_index + 1) % count; channel = scan_index; }
+  const mhz = bandMhz(channel);
+  makeCodes(mhz, acqTick++, codes);
+  haveData = true;
+  for (let j = 0; j < FFT_BINS; j++) {
+    if (codes[j] >= peak[j]) peak[j] = codes[j];
+    else if (peak[j]) peak[j]--;
+  }
+  analyse();
+  waterfallPush();
+}
+
+/* ---- 瀑布调色板（palette_init 逐项一致） ---- */
+const wfPalette = [];
+for (let i = 0; i < 256; i++) {
+  let r = 0, g = 0, b = 0;
+  if (i < 64) b = i * 4;
+  else if (i < 128) { b = 255; g = (i - 64) * 4; }
+  else if (i < 192) { g = 255; b = 255 - (i - 128) * 4; r = (i - 128) * 4; }
+  else { r = 255; g = 255 - (i - 192) * 4; }
+  wfPalette.push([r, g, b]);
+}
+
+/* ---- 渲染：顺序与 ui.c render() 相同 ---- */
+function renderTop() {
+  fillRect(0, 0, W, L.top_h, C.panel);
+  const shown = usbActive ? hostFreq : bandMhz(channel);
+  text(3, 2, bandLabel() + " CH" + bandNumber(channel), C.text, C.panel, false);
+  text(3, L.top_h - 10, (cfg.mode === 0 ? "SWP" : "LIVE") + " " + cfg.top_db + "/" + cfg.bottom_db,
+    C.dim, C.panel, false);
+  text(104, (L.top_h - 12) / 2 | 0, String(shown), C.text, C.panel, true);
+  text(W - 34, 2, "PK" + pk_db, C.peak, C.panel, false);
+  if (usbActive) text(W - 34, L.top_h - 10, "USB", C.usb, C.panel, false);
+  else text(W - 34, L.top_h - 10, "A" + act_db + "D" + det_pct, C.text, C.panel, false);
+}
+
+function renderSpectrum() {
+  const h = L.spec_h;
+  for (let y = 0; y < h; y += (h / 4) | 0)
+    for (let x = 0; x < W; x++) setPx(x, L.spec_y + y, C.grid);
+  for (let x = 0; x < W; x += (W / 8) | 0)
+    for (let y = 0; y < h; y++) setPx(x, L.spec_y + y, C.grid);
+  if (haveData && !muted) {
+    for (let x = 0; x < W; x++) {
+      const b = displayBin(x, W);
+      const mean = levelOf(codes[b], h);
+      const hold = Math.max(mean, levelOf(peak[b], h));
+      for (let y = h - mean; y < h; y++) setPx(x, L.spec_y + y, C.accent);
+      for (let y = h - hold; y < h - mean; y++) if (y >= 0) setPx(x, L.spec_y + y, C.peak);
+    }
+  }
+}
+
+function renderWaterfall() {
+  for (let r = 0; r < L.wf_h; r++) {
+    const src = ((wfNext + r) % L.wf_h) * WF_STRIDE;
+    for (let x = 0; x < W; x++) setPx(x, L.wf_y + r, wfPalette[wf[src + x]]);
+  }
+}
+
+function renderStrip() {
+  fillRect(0, L.strip_y, W, L.strip_h, C.panel);
+  const count = bandCount();
+  const cell = W / count | 0;
+  let selected = usbActive ? (sel_x * count / W | 0)
+    : (cfg.mode === 0 ? scan_index : channel);
+  if (selected >= count) selected = count - 1;
+  for (let i = 0; i < count; i++) {
+    const x = i * cell;
+    const fill = i === selected ? C.accent : C.cell;
+    fillRect(x + 1, L.strip_y + 3, cell - 2, L.strip_h - 6, fill);
+    if (cell >= 16) {
+      const label = String(bandNumber(i));
+      const tw = label.length * 6 - 1;
+      text(x + ((cell - tw) / 2 | 0), L.strip_y + ((L.strip_h - 7) / 2 | 0), label,
+        i === selected ? C.bg : C.dim, fill, false);
+    }
+  }
+  if (usbActive) {
+    fillRect(W / 2 - 18, L.strip_y + 2, 36, L.strip_h - 4, C.panel);
+    text(W / 2 - 16, L.strip_y + ((L.strip_h - 7) / 2 | 0), "USB", C.usb, C.panel, false);
+  }
+}
+
+function renderOverlays() {
+  if (muted) {
+    fillRect(W / 2 - 28, L.spec_y + (L.spec_h / 2 | 0) - 6, 56, 13, C.mute);
+    text(W / 2 - 24, L.spec_y + (L.spec_h / 2 | 0) - 4, "MUTE", C.text, C.mute, false);
+  }
+  if (!haveData && !usbActive) {
+    text(W / 2 - 27, L.spec_y + (L.spec_h / 2 | 0) - 3, "SCANNING", C.dim, C.bg, false);
+  }
+  if (keys.rot.down && !usbActive) {
+    const elapsed = nowMs() - keys.rot.pressedAt;
+    const left = elapsed >= LONG_PRESS_MS ? 0 : Math.ceil((LONG_PRESS_MS - elapsed) / 1000);
+    fillRect(6, L.spec_y + 4, 88, 15, C.panel);
+    text(9, L.spec_y + 7, "RESET " + left, C.peak, C.panel, false);
+  }
+}
+
+function render() {
+  fillRect(0, 0, W, H, C.bg);
+  renderTop();
+  renderSpectrum();
+  renderWaterfall();
+  renderStrip();
+  renderOverlays();
+  ctx.putImageData(img, 0, 0);
+  updateHud();
+}
+
+/* ---- 蜂鸣器：GPIO 通断序列，用 2.7 kHz 方波模拟 ---- */
+let audioCtx = null, audioReady = false;
+function ensureAudio() {
+  if (audioReady) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    audioReady = true;
+    buzz('boot');
+  } catch (e) { audioReady = false; }
+}
+const PATTERNS = {
+  boot: [60, 60, 60], band: [120], mode: [40, 40, 40], channel: [20],
+  top: [30], bottom: [30, 30, 30], countdown: [30], reset: [80, 80, 80, 80, 80]
+};
+function buzz(name) {
+  if (muted || !cfg.buzz || !audioReady || !audioCtx) return;
+  const pattern = PATTERNS[name];
+  if (!pattern) return;
+  let t = audioCtx.currentTime + 0.01;
+  for (let i = 0; i < pattern.length; i += 2) {
+    const on = pattern[i] / 1000;
+    const off = (pattern[i + 1] || 0) / 1000;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "square";
+    osc.frequency.value = 2700;
+    gain.gain.setValueAtTime(0.035, t);
+    gain.gain.setValueAtTime(0, t + on);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t); osc.stop(t + on);
+    t += on + off;
+  }
+}
+
+/* ---- 按键状态机（buttons.c 的行为） ---- */
+const keys = {
+  left: { down: false }, right: { down: false }, band: { down: false },
+  mode: { down: false }, rot: { down: false }
+};
+let countBeeps = 0;
+
+function nowMs() { return performance.now(); }
+
+function beginPress(k) {
+  const b = keys[k];
+  if (b.down) return;
+  const now = nowMs();
+  Object.assign(b, { down: true, pressedAt: now, lastRepeatAt: now, longSent: false, repeated: false, suppressed: false, skipShort: false });
+  if (k === 'rot') countBeeps = 0;
+  if (k === 'left' || k === 'right') {
+    if (keys.band.down) keys.band.skipShort = true;
+    if (keys.mode.down) keys.mode.skipShort = true;
+    const other = k === 'left' ? 'right' : 'left';
+    if (keys[other].down && !keys[other].suppressed && now - keys[other].pressedAt <= CHORD_WINDOW_MS) {
+      keys[other].suppressed = true;
+      keys[k].suppressed = true;
+      toggleMute();
+      if (lastStep) {
+        const count = bandCount();
+        channel = (channel + (lastStep > 0 ? count - 1 : 1)) % count;
+        scan_index = channel;
+        lastStep = 0;
+      }
+    }
+  }
+}
+
+function endPress(k) {
+  const b = keys[k];
+  if (!b.down) return;
+  b.down = false;
+  if (!b.suppressed && !b.longSent && !b.skipShort && !b.repeated) shortPress(k);
+  b.suppressed = false; b.skipShort = false; b.repeated = false;
+}
+
+function shortPress(k) {
+  if (k === 'left') directionAction(-1);
+  else if (k === 'right') directionAction(1);
+  else if (k === 'band') { if (!usbActive) toggleBand(); }
+  else if (k === 'mode') { if (!usbActive) toggleMode(); }
+  else if (k === 'rot') toggleRotation();
+}
+
+function directionAction(dir) {
+  if (usbActive) {
+    sel_x += dir * 8;
+    if (sel_x < 1) sel_x = 1;
+    if (sel_x > W - 2) sel_x = W - 2;
+  } else if (keys.band.down) {
+    adjustLimit(true, dir);
+  } else if (keys.mode.down) {
+    adjustLimit(false, dir);
+  } else {
+    changeChannel(dir);
+  }
+}
+
+function changeChannel(dir) {
+  const count = bandCount();
+  channel = (channel + (dir > 0 ? 1 : count - 1)) % count;
+  scan_index = channel;
+  lastStep = dir > 0 ? 1 : -1;
+  buzz('channel');
+}
+
+function adjustLimit(top, dir) {
+  let v = (top ? cfg.top_db : cfg.bottom_db) + (dir > 0 ? 1 : -1);
+  if (top) {
+    if (v > -10) v = -10;
+    if (v < cfg.bottom_db + 5) v = cfg.bottom_db + 5;
+    cfg.top_db = v;
+  } else {
+    if (v < -120) v = -120;
+    if (v > cfg.top_db - 5) v = cfg.top_db - 5;
+    cfg.bottom_db = v;
+  }
+  saveCfg();
+  buzz(top ? 'top' : 'bottom');
+}
+
+function toggleBand() {
+  cfg.band = cfg.band === 1 ? 0 : 1;
+  channel = scan_index = 0;
+  peak.fill(0);
+  haveData = false;
+  saveCfg();
+  buzz('band');
+}
+
+function toggleMode() {
+  cfg.mode = cfg.mode === 0 ? 1 : 0;
+  scan_index = channel;
+  saveCfg();
+  buzz('mode');
+}
+
+function toggleRotation() {
+  cfg.landscape = cfg.landscape ? 0 : 1;
+  allocBuffer();
+  wfNext = 0;
+  saveCfg();
+  buzz('mode');
+}
+
+function resetDefaults() {
+  const band = cfg.band, mode = cfg.mode;
+  Object.assign(cfg, DEFAULTS, { band, mode });
+  muted = false;
+  channel = scan_index = 0;
+  lastStep = 0;
+  allocBuffer();
+  wfNext = 0;
+  peak.fill(0);
+  wf.fill(0);
+  haveData = false;
+  saveCfg();
+  buzz('reset');
+}
+
+function toggleMute() {
+  muted = !muted;
+  if (!muted) buzz('channel');
+  updateHud();
+}
+
+function pollKeys() {
+  const now = nowMs();
+  for (const k of ['left', 'right']) {
+    const b = keys[k];
+    if (!b.down || b.suppressed || b.skipShort) continue;
+    if (now - b.pressedAt >= REPEAT_DELAY_MS && now - b.lastRepeatAt >= REPEAT_PERIOD_MS) {
+      b.lastRepeatAt = now;
+      b.repeated = true;
+      directionAction(k === 'left' ? -1 : 1);
+    }
+  }
+  const r = keys.rot;
+  if (r.down && !r.longSent && now - r.pressedAt >= LONG_PRESS_MS) {
+    r.longSent = true;
+    if (!usbActive) resetDefaults();
+  }
+  if (r.down && !usbActive) {
+    const el = now - r.pressedAt;
+    if (el >= 3000 && countBeeps < 1) { countBeeps = 1; buzz('countdown'); }
+    if (el >= 4000 && countBeeps < 2) { countBeeps = 2; buzz('countdown'); }
+  }
+}
+
+/* ---- 主循环 ---- */
+let lastAcq = 0, lastRender = 0, wasUsb = false;
+
+function frame(t) {
+  pollKeys();
+  if (usbActive !== wasUsb) {
+    wasUsb = usbActive;
+    lastRender = 0;
+  }
+  if (!usbActive && t - lastAcq >= SWEEP_PERIOD_MS) {
+    lastAcq = t;
+    acquire();
+  }
+  const period = usbActive ? HOST_PERIOD_MS : RENDER_PERIOD_MS;
+  if (t - lastRender >= period) {
+    lastRender = t;
+    if (!usbActive) sel_x = (channel * W + (W / 2 | 0)) / bandCount() | 0;
+    render();
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ---- 持久化（对应 NVS） ---- */
+const STORE_KEY = 'esp-sdr-c5-lcd-ui';
+function saveCfg() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch (e) {}
+}
+function loadCfg() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    if (Number.isInteger(s.band) && s.band <= 1) cfg.band = s.band;
+    if (Number.isInteger(s.mode) && s.mode <= 1) cfg.mode = s.mode;
+    if (typeof s.landscape === 'boolean') cfg.landscape = s.landscape ? 1 : 0;
+    if (Number.isInteger(s.landscape)) cfg.landscape = s.landscape ? 1 : 0;
+    if (typeof s.buzz === 'boolean') cfg.buzz = s.buzz ? 1 : 0;
+    if (Number.isInteger(s.top_db)) cfg.top_db = s.top_db;
+    if (Number.isInteger(s.bottom_db)) cfg.bottom_db = s.bottom_db;
+    cfg.top_db = Math.min(-10, Math.max(-100, cfg.top_db));
+    cfg.bottom_db = Math.min(cfg.top_db - 5, Math.max(-120, cfg.bottom_db));
+  } catch (e) {}
+}
+
+/* ---- 页面控件与 HUD ---- */
+function updateHud() {
+  document.getElementById('stBand').textContent = bandLabel();
+  document.getElementById('stChan').textContent = "CH" + bandNumber(channel) + " · " + bandMhz(channel) + " MHz";
+  document.getElementById('stMode').textContent = cfg.mode === 0 ? 'SWEEP' : 'LIVE';
+  document.getElementById('stRange').textContent = cfg.top_db + " / " + cfg.bottom_db + " dB";
+  document.getElementById('stRot').textContent = cfg.landscape ? '横屏 320×240' : '竖屏 240×320';
+  document.getElementById('stMute').textContent = muted ? '是' : '否';
+  document.getElementById('orientLabel').textContent = cfg.landscape ? '320 × 240 · ST7789' : '240 × 320 · ST7789';
+  document.getElementById('hostLabel').textContent = usbActive ? 'BURST HOST: ACTIVE' : 'BURST HOST: IDLE';
+}
+
+document.querySelectorAll('.key').forEach((btn) => {
+  const k = btn.dataset.key;
+  btn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    ensureAudio();
+    btn.classList.add('active');
+    btn.setPointerCapture(e.pointerId);
+    beginPress(k);
+  });
+  const up = (e) => { btn.classList.remove('active'); endPress(k); };
+  btn.addEventListener('pointerup', up);
+  btn.addEventListener('pointercancel', up);
+  btn.addEventListener('lostpointercapture', up);
+});
+
+const KEYMAP = { ArrowLeft: 'left', ArrowRight: 'right', b: 'band', B: 'band', m: 'mode', M: 'mode', r: 'rot', R: 'rot' };
+window.addEventListener('keydown', (e) => {
+  const k = KEYMAP[e.key];
+  if (!k) return;
+  e.preventDefault();
+  ensureAudio();
+  beginPress(k);
+});
+window.addEventListener('keyup', (e) => {
+  const k = KEYMAP[e.key];
+  if (!k) return;
+  e.preventDefault();
+  endPress(k);
+});
+
+const hostToggle = document.getElementById('hostToggle');
+const hostFreqEl = document.getElementById('hostFreq');
+hostToggle.addEventListener('change', () => {
+  usbActive = hostToggle.checked;
+  hostFreqEl.disabled = !usbActive;
+  if (usbActive) {
+    sel_x = (channel * W + (W / 2 | 0)) / bandCount() | 0;
+    // 固件在主机接管时不采集，保留最后一帧频谱
+    updateHud();
+  }
+});
+hostFreqEl.addEventListener('input', () => {
+  hostFreq = parseInt(hostFreqEl.value, 10);
+  document.getElementById('stHostFreq').textContent = hostFreq + " MHz";
+  if (usbActive) { lastRender = 0; }
+});
+
+/* ---- 启动：对应 local_ui_start() ---- */
+loadCfg();
+allocBuffer();
+if (cfg.landscape) { /* already */ }
+channel = 0; scan_index = 0;
+wf.fill(0); peak.fill(0);
+haveData = false;
+render();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

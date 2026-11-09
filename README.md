@@ -57,7 +57,10 @@ release.
 
 The panel sweeps the 2.4 GHz or 5 GHz band, or stays on one channel (`SWEEP` /
 `LIVE`), and draws the live spectrum with peak hold, a scrolling waterfall and a
-channel strip. While a USB/UART host is streaming, the panel stops retuning,
+channel strip. An interactive simulation of the same screen (same fonts,
+colours, layout, key handling and timings) is in
+[`docs/lcd-ui-preview.html`](docs/lcd-ui-preview.html) — download it and open it
+in a browser. While a USB/UART host is streaming, the panel stops retuning,
 mirrors the host's frequency and keeps its keys working; setting changes (band,
 mode, dB range, orientation, buzzer) are stored in NVS.
 
@@ -67,7 +70,7 @@ mode, dB range, orientation, buzzer) are stored in NVS.
 | `BAND` | 2.4 GHz ↔ 5 GHz | |
 | `MODE` | sweep ↔ live | |
 | `ROT` | rotate 90° | 5 s: reset to defaults |
-| `LEFT` + `RIGHT` | mute (buzzer and display updates off) | |
+| `LEFT` + `RIGHT` | mute (buzzer off, spectrum bars hidden) | |
 
 Wiring: SCK 6, MOSI 7, CS 8, DC 9, RST 10, backlight 23; keys `LEFT` 2, `MODE`
 3, `BAND` 4, `ROT` 5, `RIGHT` 24 (active low, internal pull-ups); buzzer 1.
