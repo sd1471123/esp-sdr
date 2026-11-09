@@ -93,7 +93,8 @@
       </div>
 
       <p class="hint">
-        <kbd>←</kbd><kbd>→</kbd> 信道 · <kbd>B</kbd> 频段 · <kbd>M</kbd> 模式 · <kbd>R</kbd> 旋转<br>
+        <kbd>←</kbd><kbd>→</kbd> 信道（扫描时只挪选框，不重新调谐）<br>
+        <kbd>B</kbd> 频段 · <kbd>M</kbd> 模式 · <kbd>R</kbd> 旋转<br>
         按住 <kbd>B</kbd>/<kbd>M</kbd> 再按方向键：调上限/下限<br>
         左右同按：静音 · 长按 <kbd>R</kbd> 5 s：恢复默认<br>
         默认 5G、SWEEP、横屏、-26/-105 dB，与固件一致。
@@ -144,7 +145,7 @@ const REPEAT_PERIOD_MS = 200;
 const CHORD_WINDOW_MS = 350;
 
 /* ---- 状态（对应 ui_settings_t + ui.c 静态变量） ---- */
-const DEFAULTS = { band: 1, mode: 0, landscape: 1, buzz: 1, top_db: -26, bottom_db: -105 };
+const DEFAULTS = { band: 1, mode: 0, landscape: 1, buzz: 1, mute: 0, top_db: -26, bottom_db: -105 };
 const cfg = { ...DEFAULTS };
 let channel = 0, scan_index = 0;
 let muted = false, usbActive = false;
@@ -162,6 +163,8 @@ const bandPeak = new Uint8Array(320);
 const chPk = new Uint8Array(36), chAct = new Uint8Array(36), chDet = new Uint8Array(36);
 let haveData = false;
 let pk_db = 0, act_db = 0, det_pct = 0;
+const chPkDb = new Int8Array(36), chActDb = new Int8Array(36);
+const chSeen = new Uint8Array(36);
 
 /* ---- 画布与布局 ---- */
 const canvas = document.getElementById('lcd');
@@ -272,6 +275,8 @@ function bandCount() { return cfg.band === 1 ? 36 : 13; }
 function bandNumber(i) { return cfg.band === 1 ? 36 + i * 4 : i + 1; }
 function bandMhz(i) { return cfg.band === 1 ? 5180 + i * 20 : 2412 + i * 5; }
 function bandLabel() { return cfg.band === 1 ? "5G" : "2.4G"; }
+/* ch104 in 5G, ch7 in 2.4G: where the cursor and the sweep start (design spec). */
+function middleIndex() { return (bandCount() - 1) / 2 | 0; }
 
 /* ---- 频谱电平映射（ui.c: level_of） ---- */
 function levelOf(code, h) {
@@ -342,7 +347,6 @@ function acquire() {
   const sweep = cfg.mode === 0;
   if (sweep) {
     scan_index = (scan_index + 1) % count;
-    channel = scan_index;
     if (scan_index === 0) {
       /* one full pass done: 2 dB of peak-hold decay, like the phone app */
       for (let x = 0; x < W; x++) if (bandPeak[x]) bandPeak[x]--;
@@ -350,11 +354,12 @@ function acquire() {
   } else {
     for (let x = 0; x < W; x++) if (bandPeak[x]) bandPeak[x]--;
   }
-  const mhz = bandMhz(channel);
+  const tuned = sweep ? scan_index : channel;
+  const mhz = bandMhz(tuned);
   makeCodes(mhz, acqTick++, codes);
   haveData = true;
-  const lo = sweep ? (channel * W / count | 0) : 0;
-  let hi = sweep ? ((channel + 1) * W / count | 0) : W;
+  const lo = sweep ? (tuned * W / count | 0) : 0;
+  let hi = sweep ? ((tuned + 1) * W / count | 0) : W;
   if (hi <= lo) hi = lo + 1;
   if (hi > W) hi = W;
   const span = hi - lo;
@@ -367,9 +372,10 @@ function acquire() {
   analyse();
   const lv = Math.max(0, Math.min(100, Math.trunc((pk_db - (cfg.bottom_db + 4)) * 100 / 50)));
   const ac = Math.max(0, Math.min(100, Math.trunc(act_db * 100 / 60)));
-  chPk[channel] = lv;
-  chAct[channel] = ac;
-  chDet[channel] = Math.max(0, Math.min(100, det_pct));
+  chPk[tuned] = lv;
+  chAct[tuned] = ac;
+  chDet[tuned] = Math.max(0, Math.min(100, det_pct));
+  chPkDb[tuned] = pk_db; chActDb[tuned] = act_db; chSeen[tuned] = 1;
   waterfallPush();
 }
 
@@ -403,8 +409,10 @@ function renderTop() {
   roundRectBorder(bx, by, bw, bh, 4, edge);
   const mode = live ? "LIVE" : "SWEEP";
   text(bx + ((bw - textW(mode)) / 2 | 0), (top - 7) / 2 | 0, mode, edge, tint, false);
-  const readout = W >= 300 ? `PK${pk_db} ACT${act_db} DET${det_pct}%`
-                           : `P${pk_db} A${act_db} D${det_pct}%`;
+  let dpk = pk_db, dact = act_db, ddet = det_pct;
+  if (cfg.mode === 0 && chSeen[channel]) { dpk = chPkDb[channel]; dact = chActDb[channel]; ddet = chDet[channel]; }
+  const readout = W >= 300 ? `PK${dpk} ACT${dact} DET${ddet}%`
+                           : `P${dpk} A${dact} D${ddet}%`;
   text(bx + bw + 6, (top - 7) / 2 | 0, readout, C.muted, C.panel, false);
   const shown = usbActive ? hostFreq : bandMhz(channel);
   const right = `ch${bandNumber(channel)} ${shown}M`;
@@ -644,7 +652,6 @@ function directionAction(dir) {
 function changeChannel(dir) {
   const count = bandCount();
   channel = (channel + (dir > 0 ? 1 : count - 1)) % count;
-  scan_index = channel;
   lastStep = dir > 0 ? 1 : -1;
   buzz('channel');
 }
@@ -666,11 +673,12 @@ function adjustLimit(top, dir) {
 
 function toggleBand() {
   cfg.band = cfg.band === 1 ? 0 : 1;
-  channel = scan_index = 0;
+  channel = scan_index = middleIndex();
   bandCodes.fill(0); bandPeak.fill(0);
   wf.fill(0);
   wfNext = 0;
   chPk.fill(0); chAct.fill(0); chDet.fill(0);
+  chPkDb.fill(0); chActDb.fill(0); chSeen.fill(0);
   haveData = false;
   saveCfg();
   buzz('band');
@@ -678,7 +686,12 @@ function toggleBand() {
 
 function toggleMode() {
   cfg.mode = cfg.mode === 0 ? 1 : 0;
+  if (cfg.mode === 0) channel = middleIndex();
   scan_index = channel;
+  bandCodes.fill(0); bandPeak.fill(0);
+  wf.fill(0);
+  wfNext = 0;
+  haveData = false;
   saveCfg();
   buzz('mode');
 }
@@ -695,15 +708,17 @@ function toggleRotation() {
 }
 
 function resetDefaults() {
-  const band = cfg.band, mode = cfg.mode;
-  Object.assign(cfg, DEFAULTS, { band, mode });
+  Object.assign(cfg, DEFAULTS);
   muted = false;
-  channel = scan_index = 0;
+  try { localStorage.removeItem(STORE_KEY); } catch (e) {}
+  chSeen.fill(0);
+  channel = scan_index = middleIndex();
   lastStep = 0;
   allocBuffer();
   wfNext = 0;
   bandCodes.fill(0); bandPeak.fill(0);
   chPk.fill(0); chAct.fill(0); chDet.fill(0);
+  chPkDb.fill(0); chActDb.fill(0); chSeen.fill(0);
   wf.fill(0);
   haveData = false;
   saveCfg();
@@ -712,6 +727,8 @@ function resetDefaults() {
 
 function toggleMute() {
   muted = !muted;
+  cfg.mute = muted ? 1 : 0;
+  saveCfg();
   if (!muted) buzz('channel');
   updateHud();
 }
@@ -776,6 +793,7 @@ function loadCfg() {
     if (typeof s.landscape === 'boolean') cfg.landscape = s.landscape ? 1 : 0;
     if (Number.isInteger(s.landscape)) cfg.landscape = s.landscape ? 1 : 0;
     if (typeof s.buzz === 'boolean') cfg.buzz = s.buzz ? 1 : 0;
+    if (Number.isInteger(s.mute)) cfg.mute = s.mute ? 1 : 0;
     if (Number.isInteger(s.top_db)) cfg.top_db = s.top_db;
     if (Number.isInteger(s.bottom_db)) cfg.bottom_db = s.bottom_db;
     cfg.top_db = Math.min(-10, Math.max(-100, cfg.top_db));
@@ -846,7 +864,8 @@ hostFreqEl.addEventListener('input', () => {
 loadCfg();
 allocBuffer();
 if (cfg.landscape) { /* already */ }
-channel = 0; scan_index = 0;
+muted = !!cfg.mute;
+channel = scan_index = middleIndex();
 wf.fill(0); bandCodes.fill(0); bandPeak.fill(0);
 haveData = false;
 render();

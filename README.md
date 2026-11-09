@@ -67,15 +67,16 @@ colours, layout, key handling and timings) is in
 [`docs/lcd-ui-preview.html`](docs/lcd-ui-preview.html) — download it and open it
 in a browser. While a USB/UART host is streaming, the panel stops retuning,
 mirrors the host's frequency and keeps its keys working; setting changes (band,
-mode, dB range, orientation, buzzer) are stored in NVS.
+mode, dB range, orientation, buzzer, mute) are stored in NVS, and a 5 s `ROT`
+hold restores the defaults and wipes that store.
 
 | Key | Short press | Hold |
 | --- | --- | --- |
-| `LEFT` / `RIGHT` | channel step (auto-repeat after 0.4 s) | with `BAND` held: top dB, with `MODE` held: bottom dB |
-| `BAND` | 2.4 GHz ↔ 5 GHz | |
-| `MODE` | sweep ↔ live | |
-| `ROT` | rotate 90° | 5 s: reset to defaults |
-| `LEFT` + `RIGHT` | mute (buzzer off, speaker icon shown) | |
+| `LEFT` / `RIGHT` | move the selection one channel (auto-repeat after 0.4 s); in `SWEEP` it only moves the marker and the sweep keeps scanning, its readouts come from the selected channel | with `BAND` held: top dB, with `MODE` held: bottom dB |
+| `BAND` | 2.4 GHz ↔ 5 GHz, cursor to ch7 / ch104 | |
+| `MODE` | sweep ↔ live; entering `SWEEP` returns the cursor to ch7 / ch104 | |
+| `ROT` | rotate 90° | 5 s: defaults back, stored settings erased |
+| `LEFT` + `RIGHT` | mute on/off (persisted, speaker icon shown) | |
 
 Wiring: SCK 6, MOSI 7, CS 8, DC 9, RST 10, backlight 23; keys `LEFT` 2, `MODE`
 3, `BAND` 4, `ROT` 5, `RIGHT` 24 (active low, internal pull-ups); buzzer 1.

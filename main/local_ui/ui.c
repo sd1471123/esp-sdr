@@ -83,10 +83,15 @@ static unsigned wf_next;
 
 static const uint16_t spec_palette[4] = {COL_SPEC_BG, COL_GRID, COL_TRACE, COL_PEAK};
 static uint8_t ch_pk[36], ch_act[36], ch_det[36];
+static int8_t ch_pk_db[36], ch_act_db[36];
+static uint64_t ch_seen; /* bit per channel with at least one capture */
 
 static unsigned band_count(void) { return cfg.band == UI_BAND_5G ? 36 : 13; }
 static unsigned band_number(unsigned idx) { return cfg.band == UI_BAND_5G ? 36 + idx * 4 : idx + 1; }
 static unsigned band_mhz(unsigned idx) { return cfg.band == UI_BAND_5G ? 5180 + idx * 20 : 2412 + idx * 5; }
+
+/* ch104 in 5G, ch7 in 2.4G: where the cursor and the sweep start (design spec). */
+static unsigned middle_index(void) { return (band_count() - 1) / 2; }
 
 static void layout_build(void) {
     unsigned w = lcd_width(), h = lcd_height();
@@ -206,11 +211,17 @@ static void render_top(unsigned w) {
     const char *mode = live ? "LIVE" : "SWEEP";
     ui_text(bx + (bw - text_w(mode)) / 2, (top - FONT5X7_H) / 2, mode, edge, tint, false);
 
+    int dpk = pk_db, dact = act_db, ddet = det_pct;
+    if (cfg.mode == UI_MODE_SWEEP && ((ch_seen >> channel) & 1u)) {
+        dpk = ch_pk_db[channel];
+        dact = ch_act_db[channel];
+        ddet = ch_det[channel];
+    }
     char line[40];
     if (w >= 300)
-        snprintf(line, sizeof(line), "PK%d ACT%d DET%d%%", pk_db, act_db, det_pct);
+        snprintf(line, sizeof(line), "PK%d ACT%d DET%d%%", dpk, dact, ddet);
     else
-        snprintf(line, sizeof(line), "P%d A%d D%d%%", pk_db, act_db, det_pct);
+        snprintf(line, sizeof(line), "P%d A%d D%d%%", dpk, dact, ddet);
     ui_text(bx + bw + 6, (top - FONT5X7_H) / 2, line, COL_MUTED, COL_PANEL, false);
 
     unsigned shown = usb_active ? sdr_ui_frequency() : band_mhz(channel);
@@ -298,7 +309,8 @@ static void render_spectrum(unsigned w) {
         ui_text(4, layout.spec_y + 4, "LIVE 20M", COL_GLOW, COL_SPEC_BG, false);
     } else {
         char lab[40];
-        snprintf(lab, sizeof(lab), "ch%u %uM  %d%%", band_number(channel), shown, det_pct);
+        int cdet = ((ch_seen >> channel) & 1u) ? ch_det[channel] : det_pct;
+        snprintf(lab, sizeof(lab), "ch%u %uM  %d%%", band_number(channel), shown, cdet);
         unsigned lw = text_w(lab) + 10;
         fill_round_rect(3, layout.spec_y + 5, lw, 13, 3, 0x08A3);
         round_rect_border(3, layout.spec_y + 5, lw, 13, 3, COL_ACCENT);
@@ -338,8 +350,7 @@ static void render_strip(unsigned w) {
     unsigned actY = y + h - actH;
     unsigned detY = actY - barGap - detH;
     unsigned labelY = y + (detY - y - FONT5X7_H) / 2;
-    unsigned selected = usb_active ? (unsigned)((sel_x * (int)count) / (int)w)
-                                   : (cfg.mode == UI_MODE_SWEEP ? scan_index : channel);
+    unsigned selected = usb_active ? (unsigned)((sel_x * (int)count) / (int)w) : channel;
     if (selected >= count) selected = count - 1;
     char label[8];
     for (unsigned i = 0; i < count; i++) {
@@ -436,8 +447,7 @@ static void analyse(void) {
     det_pct = (int)(det * 100 / FFT_BINS);
 }
 
-static void stats_store(void) {
-    unsigned i = channel;
+static void stats_store(unsigned i) {
     if (i >= 36) return;
     int lv = (pk_db - (cfg.bottom_db + 4)) * 100 / 50;
     int ac = act_db * 100 / 60;
@@ -451,6 +461,9 @@ static void stats_store(void) {
     ch_pk[i] = (uint8_t)lv;
     ch_act[i] = (uint8_t)ac;
     ch_det[i] = (uint8_t)de;
+    ch_pk_db[i] = (int8_t)pk_db;
+    ch_act_db[i] = (int8_t)act_db;
+    ch_seen |= (uint64_t)1 << i;
 }
 
 static void waterfall_push(void) {
@@ -468,7 +481,6 @@ static void acquire(void) {
     bool sweep = cfg.mode == UI_MODE_SWEEP;
     if (sweep) {
         scan_index = (uint8_t)((scan_index + 1) % count);
-        channel = scan_index;
         if (scan_index == 0) {
             /* one full pass done: 2 dB of peak-hold decay, like the phone app */
             for (unsigned x = 0; x < w; x++)
@@ -478,13 +490,14 @@ static void acquire(void) {
         for (unsigned x = 0; x < w; x++)
             if (band_peak[x]) band_peak[x]--;
     }
-    unsigned mhz = band_mhz(channel);
+    unsigned tuned = sweep ? scan_index : channel;
+    unsigned mhz = band_mhz(tuned);
     unsigned elapsed = 0;
     if (!sdr_ui_spectrum(mhz, FFT_BINS, RATE_CODE, codes, &elapsed)) return;
     have_data = true;
 
-    unsigned lo = sweep ? (unsigned)channel * w / count : 0;
-    unsigned hi = sweep ? (unsigned)(channel + 1) * w / count : w;
+    unsigned lo = sweep ? (unsigned)tuned * w / count : 0;
+    unsigned hi = sweep ? (unsigned)(tuned + 1) * w / count : w;
     if (hi <= lo) hi = lo + 1;
     if (hi > w) hi = w;
     unsigned span = hi - lo;
@@ -496,7 +509,7 @@ static void acquire(void) {
         if (v >= band_peak[x]) band_peak[x] = v;
     }
     analyse();
-    stats_store();
+    stats_store(tuned);
     waterfall_push();
     (void)elapsed;
 }
@@ -504,7 +517,6 @@ static void acquire(void) {
 static void change_channel(int direction) {
     unsigned count = band_count();
     channel = (uint8_t)((channel + (direction > 0 ? 1 : count - 1)) % count);
-    scan_index = channel;
     last_step = direction > 0 ? 1 : -1;
     buzzer_play(UI_BUZZ_CHANNEL);
 }
@@ -526,7 +538,7 @@ static void adjust_limit(bool top, int direction) {
 
 static void toggle_band(void) {
     cfg.band = cfg.band == UI_BAND_5G ? UI_BAND_24G : UI_BAND_5G;
-    channel = scan_index = 0;
+    channel = scan_index = (uint8_t)middle_index();
     memset(band_codes, 0, sizeof(band_codes));
     memset(band_peak, 0, sizeof(band_peak));
     memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
@@ -534,6 +546,9 @@ static void toggle_band(void) {
     memset(ch_pk, 0, sizeof(ch_pk));
     memset(ch_act, 0, sizeof(ch_act));
     memset(ch_det, 0, sizeof(ch_det));
+    memset(ch_pk_db, 0, sizeof(ch_pk_db));
+    memset(ch_act_db, 0, sizeof(ch_act_db));
+    ch_seen = 0;
     have_data = false;
     ui_settings_save(&cfg);
     buzzer_play(UI_BUZZ_BAND);
@@ -542,9 +557,16 @@ static void toggle_band(void) {
 
 static void toggle_mode(void) {
     cfg.mode = cfg.mode == UI_MODE_SWEEP ? UI_MODE_LIVE : UI_MODE_SWEEP;
+    if (cfg.mode == UI_MODE_SWEEP) channel = (uint8_t)middle_index();
     scan_index = channel;
+    memset(band_codes, 0, sizeof(band_codes));
+    memset(band_peak, 0, sizeof(band_peak));
+    memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
+    wf_next = 0;
+    have_data = false;
     ui_settings_save(&cfg);
     buzzer_play(UI_BUZZ_MODE);
+    full_clear = true;
 }
 
 static void toggle_rotation(void) {
@@ -564,12 +586,10 @@ static void toggle_rotation(void) {
 static void reset_defaults(void) {
     ui_settings_t fresh;
     ui_settings_defaults(&fresh);
-    fresh.band = cfg.band;
-    fresh.mode = cfg.mode;
     cfg = fresh;
     muted = false;
     buzzer_enable(true);
-    channel = scan_index = 0;
+    channel = scan_index = (uint8_t)middle_index();
     last_step = 0;
     lcd_set_rotation(cfg.landscape != 0);
     layout_build();
@@ -581,13 +601,15 @@ static void reset_defaults(void) {
     memset(ch_det, 0, sizeof(ch_det));
     memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
     have_data = false;
-    ui_settings_save(&cfg);
+    ui_settings_clear();
     buzzer_play(UI_BUZZ_RESET);
     full_clear = true;
 }
 
 static void toggle_mute(void) {
     muted = !muted;
+    cfg.mute = muted ? 1 : 0;
+    ui_settings_save(&cfg);
     buzzer_enable(!muted);
     if (!muted) buzzer_play(UI_BUZZ_CHANNEL);
 }
@@ -599,7 +621,6 @@ static void handle_events(const ui_button_event_t *event) {
         if (last_step) {
             unsigned count = band_count();
             channel = (uint8_t)((channel + (last_step > 0 ? count - 1 : 1)) % count);
-            scan_index = channel;
             last_step = 0;
         }
     }
@@ -719,10 +740,11 @@ void local_ui_start(void) {
 
     buttons_init();
     buzzer_init();
-    buzzer_enable(cfg.buzz != 0);
+    buzzer_enable(cfg.buzz != 0 && !cfg.mute);
     buzzer_play(UI_BUZZ_BOOT);
 
-    channel = 0;
-    scan_index = 0;
+    muted = cfg.mute != 0;
+    channel = (uint8_t)middle_index();
+    scan_index = channel;
     xTaskCreate(ui_task, "local_ui", 6144, NULL, 3, NULL);
 }

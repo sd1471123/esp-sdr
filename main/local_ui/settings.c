@@ -14,6 +14,7 @@ void ui_settings_defaults(ui_settings_t *s) {
     s->mode = UI_MODE_SWEEP;
     s->landscape = 1;
     s->buzz = 1;
+    s->mute = 0;
     s->top_db = -26;
     s->bottom_db = -105;
 }
@@ -23,6 +24,7 @@ static void sanitize(ui_settings_t *s) {
     if (s->mode > UI_MODE_LIVE) s->mode = UI_MODE_LIVE;
     if (s->landscape > 1) s->landscape = 1;
     if (s->buzz > 1) s->buzz = 1;
+    if (s->mute > 1) s->mute = 1;
     s->top_db = clamp_db(s->top_db, -100, -10);
     s->bottom_db = clamp_db(s->bottom_db, -120, s->top_db - 5);
 }
@@ -36,6 +38,7 @@ void ui_settings_load(ui_settings_t *s) {
     if (nvs_get_u8(handle, "mode", &v) == ESP_OK) s->mode = v;
     if (nvs_get_u8(handle, "land", &v) == ESP_OK) s->landscape = v;
     if (nvs_get_u8(handle, "buzz", &v) == ESP_OK) s->buzz = v;
+    if (nvs_get_u8(handle, "mute", &v) == ESP_OK) s->mute = v;
     int8_t d;
     if (nvs_get_i8(handle, "top", &d) == ESP_OK) s->top_db = d;
     if (nvs_get_i8(handle, "bot", &d) == ESP_OK) s->bottom_db = d;
@@ -50,8 +53,17 @@ void ui_settings_save(const ui_settings_t *s) {
     nvs_set_u8(handle, "mode", s->mode);
     nvs_set_u8(handle, "land", s->landscape);
     nvs_set_u8(handle, "buzz", s->buzz);
+    nvs_set_u8(handle, "mute", s->mute);
     nvs_set_i8(handle, "top", s->top_db);
     nvs_set_i8(handle, "bot", s->bottom_db);
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+void ui_settings_clear(void) {
+    nvs_handle_t handle;
+    if (nvs_open(UI_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return;
+    nvs_erase_all(handle);
     nvs_commit(handle);
     nvs_close(handle);
 }

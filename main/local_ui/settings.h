@@ -10,6 +10,7 @@ typedef struct {
     uint8_t mode;      /* ui_mode_t */
     uint8_t landscape; /* 1 = 320x240 */
     uint8_t buzz;      /* 1 = buzzer enabled */
+    uint8_t mute;      /* 1 = muted (persisted with the chord) */
     int8_t top_db;     /* spectrum upper limit */
     int8_t bottom_db;  /* spectrum lower limit */
 } ui_settings_t;
@@ -17,3 +18,4 @@ typedef struct {
 void ui_settings_defaults(ui_settings_t *settings);
 void ui_settings_load(ui_settings_t *settings);
 void ui_settings_save(const ui_settings_t *settings);
+void ui_settings_clear(void);
