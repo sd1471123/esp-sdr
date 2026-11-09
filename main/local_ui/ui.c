@@ -58,8 +58,7 @@ typedef struct {
 static ui_settings_t cfg;
 static layout_t layout;
 static uint8_t channel;    /* selected channel index inside the band */
-static uint8_t last_tuned;  /* channel whose window is on screen */
-static uint8_t win_peak[FFT_BINS]; /* peak hold of the displayed window */
+static uint8_t scan_index; /* sweep position */
 static uint8_t codes[FFT_BINS];
 /* Stitched band image, one entry per pixel column (same idea as the phone app): every
  * acquisition only refreshes the columns of the channel it captured, so the waterfall
@@ -68,6 +67,8 @@ static uint8_t band_codes[320];
 static uint8_t band_peak[320];
 /* Power accumulation for the running sweep, like the phone app: the trace is the
  * sweep average, the amber line is the max hold (2 dB decay per finished sweep). */
+static float *spec_sum;
+static uint16_t *spec_cnt;
 static bool have_data;
 static bool muted;
 static bool usb_active;
@@ -91,15 +92,23 @@ static uint8_t ch_pk[36], ch_act[36], ch_det[36];
 static int8_t ch_pk_db[36], ch_act_db[36];
 static uint64_t ch_seen; /* bit per channel with at least one capture */
 
-/* Map an n-entry capture onto w pixels with linear interpolation. */
-static uint8_t lerp8(const uint8_t *src, unsigned n, unsigned x, unsigned w) {
-    if (n < 2 || w < 2) return src[0];
-    unsigned num = x * (n - 1), den = w - 1;
-    unsigned i = num / den, f = (num % den) * 256 / den;
-    unsigned a = src[i], b = src[i + 1 < n ? i + 1 : i];
-    return (uint8_t)((a * (256 - f) + b * f) >> 8);
+/* Power average of the FFT bins covered by one pixel column. Without this the
+ * 256-bin capture was sampled at a single bin per column, which left the stitched
+ * trace far sparser and noisier than the phone app's. */
+static uint8_t column_code(unsigned x, unsigned lo, unsigned hi, unsigned span) {
+    unsigned b0 = (x - lo) * FFT_BINS / span;
+    unsigned b1 = (x + 1 - lo) * FFT_BINS / span;
+    if (b0 >= FFT_BINS) b0 = FFT_BINS - 1;
+    if (b1 > FFT_BINS) b1 = FFT_BINS;
+    if (b1 <= b0) b1 = b0 + 1;
+    float p = 0.0f;
+    for (unsigned b = b0; b < b1; b++) p += powf(10.0f, ((float)codes[b] * 0.5f - 84.0f) * 0.1f);
+    float db = 10.0f * log10f(p / (float)(b1 - b0));
+    int v = (int)((db + 84.0f) * 2.0f + 0.5f);
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    return (uint8_t)v;
 }
-
 
 static unsigned band_count(void) { return cfg.band == UI_BAND_5G ? 36 : 13; }
 static unsigned band_number(unsigned idx) { return cfg.band == UI_BAND_5G ? 36 + idx * 4 : idx + 1; }
@@ -279,8 +288,8 @@ static void render_spectrum(unsigned w) {
     if (have_data) {
         int prev = -1;
         for (unsigned x = 0; x < w; x++) {
-            int mean = level_of(lerp8(codes, FFT_BINS, x, w), h);
-            int hold = level_of(lerp8(win_peak, FFT_BINS, x, w), h);
+            int mean = level_of(band_codes[x], h);
+            int hold = level_of(band_peak[x], h);
             if (hold < mean) hold = mean;
             int y = (int)h - 1 - mean;
             if (y < 0) y = 0;
@@ -306,7 +315,17 @@ static void render_spectrum(unsigned w) {
     }
 
     unsigned shown = usb_active ? sdr_ui_frequency() : band_mhz(channel);
-    unsigned lo_mhz = shown - 10, hi_mhz = shown + 10;
+    unsigned lo_mhz, hi_mhz;
+    if (usb_active) {
+        lo_mhz = shown - 10;
+        hi_mhz = shown + 10;
+    } else if (cfg.mode == UI_MODE_SWEEP) {
+        lo_mhz = band_mhz(0) - 10;
+        hi_mhz = band_mhz(band_count() - 1) + 10;
+    } else {
+        lo_mhz = shown - 10;
+        hi_mhz = shown + 10;
+    }
     snprintf(line, sizeof(line), "%u", lo_mhz);
     ui_text(4, layout.spec_y + h - FONT5X7_H - 3, line, COL_DIM, COL_SPEC_BG, false);
     snprintf(line, sizeof(line), "%u", hi_mhz);
@@ -526,7 +545,7 @@ static void waterfall_push(void) {
     unsigned rows = layout.wf_h;
     uint8_t *row = wf + wf_next * WF_STRIDE;
     if (w > WF_STRIDE) w = WF_STRIDE;
-    for (unsigned x = 0; x < w; x++) row[x] = lerp8(codes, FFT_BINS, x, w);
+    memcpy(row, band_codes, w);
     wf_next = (wf_next + 1) % rows;
 }
 
@@ -535,44 +554,47 @@ static void acquire(void) {
     unsigned count = band_count();
     bool sweep = cfg.mode == UI_MODE_SWEEP;
     if (sweep) {
-        /* the sweep owns the tuning: one 20 MHz window per step, cursor follows it */
-        channel = (uint8_t)((channel + 1) % count);
-        if (channel == 0) {
+        scan_index = (uint8_t)((scan_index + 1) % count);
+        if (scan_index == 0) {
             /* one full pass done: the phone app drops PEAK_DECAY_DB (2 dB) from the hold */
             for (unsigned x = 0; x < w; x++)
                 if (band_peak[x]) band_peak[x]--;
+            if (spec_sum) memset(spec_sum, 0, 320 * sizeof(float));
+            if (spec_cnt) memset(spec_cnt, 0, 320 * sizeof(uint16_t));
             rebuild_channel_stats();
         }
     }
-    unsigned mhz = band_mhz(channel);
+    unsigned tuned = sweep ? scan_index : channel;
+    unsigned mhz = band_mhz(tuned);
     unsigned elapsed = 0;
     if (!sdr_ui_spectrum(mhz, FFT_BINS, RATE_CODE, codes, &elapsed)) return;
     have_data = true;
-    if (channel != last_tuned) {
-        memset(win_peak, 0, sizeof(win_peak));
-        last_tuned = channel;
-    }
-    for (unsigned i = 0; i < FFT_BINS; i++) {
-        if (codes[i] >= win_peak[i])
-            win_peak[i] = codes[i];
-        else if (win_peak[i])
-            win_peak[i]--;
-    }
 
-    unsigned lo = w * channel / count, hi = w * (channel + 1) / count;
+    unsigned lo = sweep ? (unsigned)tuned * w / count : 0;
+    unsigned hi = sweep ? (unsigned)(tuned + 1) * w / count : w;
     if (hi <= lo) hi = lo + 1;
     if (hi > w) hi = w;
+    unsigned span = hi - lo;
     for (unsigned x = lo; x < hi; x++) {
-        unsigned bin = (x - lo) * FFT_BINS / (hi - lo);
-        if (bin >= FFT_BINS) bin = FFT_BINS - 1;
-        band_codes[x] = codes[bin];
-        if (codes[bin] >= band_peak[x]) band_peak[x] = codes[bin];
+        uint8_t v = column_code(x, lo, hi, span);
+        if (sweep && spec_sum && spec_cnt) {
+            spec_sum[x] += powf(10.0f, ((float)v * 0.5f - 84.0f) * 0.1f);
+            spec_cnt[x]++;
+            float avg_db = 10.0f * log10f(spec_sum[x] / (float)spec_cnt[x]);
+            int a = (int)((avg_db + 84.0f) * 2.0f + 0.5f);
+            if (a < 0) a = 0;
+            if (a > 255) a = 255;
+            band_codes[x] = (uint8_t)a;
+        } else {
+            band_codes[x] = v;
+        }
+        if (v >= band_peak[x]) band_peak[x] = v;
     }
     analyse();
-    if (!sweep) {
-        stats_store(channel);
+    if (sweep)
+        stats_store(tuned); /* only for the per-channel dB history of the cursor */
+    else
         rebuild_channel_stats();
-    }
     waterfall_push();
     (void)elapsed;
 }
@@ -604,6 +626,7 @@ static void adjust_limit(bool top, int direction) {
 static void toggle_band(void) {
     cfg.band = cfg.band == UI_BAND_5G ? UI_BAND_24G : UI_BAND_5G;
     channel = (uint8_t)middle_index();
+    scan_index = 0; /* start the pass at the first channel so every wrap is a full pass */
     memset(band_codes, 0, sizeof(band_codes));
     memset(band_peak, 0, sizeof(band_peak));
     memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
@@ -623,6 +646,7 @@ static void toggle_band(void) {
 static void toggle_mode(void) {
     cfg.mode = cfg.mode == UI_MODE_SWEEP ? UI_MODE_LIVE : UI_MODE_SWEEP;
     if (cfg.mode == UI_MODE_SWEEP) channel = (uint8_t)middle_index();
+    scan_index = cfg.mode == UI_MODE_SWEEP ? 0 : channel;
     memset(band_codes, 0, sizeof(band_codes));
     memset(band_peak, 0, sizeof(band_peak));
     memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
@@ -654,6 +678,7 @@ static void reset_defaults(void) {
     muted = false;
     buzzer_enable(true);
     channel = (uint8_t)middle_index();
+    scan_index = 0;
     last_step = 0;
     lcd_set_rotation(cfg.landscape != 0);
     layout_build();
@@ -791,6 +816,8 @@ static void palette_init(void) {
 void local_ui_start(void) {
     if (!lcd_init()) return;
     mask = heap_caps_malloc(MASK_BYTES, MALLOC_CAP_8BIT);
+    spec_sum = heap_caps_malloc(320 * sizeof(float), MALLOC_CAP_8BIT);
+    spec_cnt = heap_caps_malloc(320 * sizeof(uint16_t), MALLOC_CAP_8BIT);
     wf = heap_caps_malloc(WF_STRIDE * WF_ROWS_MAX, MALLOC_CAP_8BIT);
     wf_line = heap_caps_malloc(320 * sizeof(uint16_t), MALLOC_CAP_8BIT);
     text_buf = heap_caps_malloc(TEXT_PIXELS * sizeof(uint16_t), MALLOC_CAP_8BIT);
@@ -809,5 +836,6 @@ void local_ui_start(void) {
 
     muted = cfg.mute != 0;
     channel = (uint8_t)middle_index();
+    scan_index = 0;
     xTaskCreate(ui_task, "local_ui", 6144, NULL, 3, NULL);
 }
