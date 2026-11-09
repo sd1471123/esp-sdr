@@ -25,8 +25,9 @@ static void sanitize(ui_settings_t *s) {
     if (s->landscape > 1) s->landscape = 1;
     if (s->buzz > 1) s->buzz = 1;
     if (s->mute > 1) s->mute = 1;
-    s->top_db = clamp_db(s->top_db, -100, -10);
-    s->bottom_db = clamp_db(s->bottom_db, -120, s->top_db - 5);
+    s->top_db = clamp_db(s->top_db, -80, -10);
+    s->bottom_db = clamp_db(s->bottom_db, -125, -55);
+    if (s->bottom_db > s->top_db - 30) s->bottom_db = s->top_db - 30;
 }
 
 void ui_settings_load(ui_settings_t *s) {

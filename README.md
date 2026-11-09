@@ -72,7 +72,7 @@ hold restores the defaults and wipes that store.
 
 | Key | Short press | Hold |
 | --- | --- | --- |
-| `LEFT` / `RIGHT` | move the selection one channel (auto-repeat after 0.4 s); in `SWEEP` it only moves the marker and the sweep keeps scanning, its readouts come from the selected channel | with `BAND` held: top dB, with `MODE` held: bottom dB |
+| `LEFT` / `RIGHT` | move the selection one channel (auto-repeat after 0.4 s); in `SWEEP` it only moves the marker and the sweep keeps scanning, its readouts come from the selected channel | with `BAND` held: top dB (5 dB steps, -80…-10), with `MODE` held: bottom dB (5 dB steps, -125…-55, keeping ≥30 dB apart) |
 | `BAND` | 2.4 GHz ↔ 5 GHz, cursor to ch7 / ch104 | |
 | `MODE` | sweep ↔ live; entering `SWEEP` returns the cursor to ch7 / ch104 | |
 | `ROT` | rotate 90° | 5 s: defaults back, stored settings erased |

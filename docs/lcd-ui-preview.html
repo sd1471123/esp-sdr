@@ -657,14 +657,16 @@ function changeChannel(dir) {
 }
 
 function adjustLimit(top, dir) {
-  let v = (top ? cfg.top_db : cfg.bottom_db) + (dir > 0 ? 1 : -1);
+  let v = (top ? cfg.top_db : cfg.bottom_db) + (dir > 0 ? 5 : -5);
   if (top) {
     if (v > -10) v = -10;
-    if (v < cfg.bottom_db + 5) v = cfg.bottom_db + 5;
+    if (v < -80) v = -80;
+    if (v < cfg.bottom_db + 30) v = cfg.bottom_db + 30;
     cfg.top_db = v;
   } else {
-    if (v < -120) v = -120;
-    if (v > cfg.top_db - 5) v = cfg.top_db - 5;
+    if (v < -125) v = -125;
+    if (v > -55) v = -55;
+    if (v > cfg.top_db - 30) v = cfg.top_db - 30;
     cfg.bottom_db = v;
   }
   saveCfg();
@@ -796,8 +798,9 @@ function loadCfg() {
     if (Number.isInteger(s.mute)) cfg.mute = s.mute ? 1 : 0;
     if (Number.isInteger(s.top_db)) cfg.top_db = s.top_db;
     if (Number.isInteger(s.bottom_db)) cfg.bottom_db = s.bottom_db;
-    cfg.top_db = Math.min(-10, Math.max(-100, cfg.top_db));
-    cfg.bottom_db = Math.min(cfg.top_db - 5, Math.max(-120, cfg.bottom_db));
+    cfg.top_db = Math.min(-10, Math.max(-80, cfg.top_db));
+    cfg.bottom_db = Math.min(-55, Math.max(-125, cfg.bottom_db));
+    if (cfg.bottom_db > cfg.top_db - 30) cfg.bottom_db = cfg.top_db - 30;
   } catch (e) {}
 }
 

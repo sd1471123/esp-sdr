@@ -523,13 +523,15 @@ static void change_channel(int direction) {
 
 static void adjust_limit(bool top, int direction) {
     int8_t *limit = top ? &cfg.top_db : &cfg.bottom_db;
-    int value = *limit + (direction > 0 ? 1 : -1);
+    int value = *limit + (direction > 0 ? 5 : -5);
     if (top) {
         if (value > -10) value = -10;
-        if (value < cfg.bottom_db + 5) value = cfg.bottom_db + 5;
+        if (value < -80) value = -80;
+        if (value < cfg.bottom_db + 30) value = cfg.bottom_db + 30;
     } else {
-        if (value < -120) value = -120;
-        if (value > cfg.top_db - 5) value = cfg.top_db - 5;
+        if (value < -125) value = -125;
+        if (value > -55) value = -55;
+        if (value > cfg.top_db - 30) value = cfg.top_db - 30;
     }
     *limit = value;
     ui_settings_save(&cfg);
