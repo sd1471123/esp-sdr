@@ -9,6 +9,7 @@
 #include "esp_cpu.h"
 #include "burst_serial.h"
 #include "dsps_fft2r.h"
+#include "esp_heap_caps.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -26,7 +27,9 @@
 #else
 #define SPEC_STORAGE
 #endif
-static int16_t fft_data[2 * MAX_FFT] __attribute__((aligned(16))) SPEC_STORAGE;
+/* fft_data and the twiddle table live on the heap: the ESP32-C5 RF dump
+ * window at 0x40820000 leaves no room for them in static BSS. */
+static int16_t *fft_data;
 static int16_t window[MAX_FFT] SPEC_STORAGE;
 /* Same workspace size for both detectors. Max-hold never needs floats;
  * mean accumulation retains fractional precision without extra SRAM. */
@@ -37,15 +40,59 @@ static union {
 static uint8_t frame[HEADER_BYTES + MAX_FFT + 4] SPEC_STORAGE;
 static unsigned setup_n;
 static bool ready;
+static int16_t clamp16(int32_t v);
+static bool spectrum_alloc(void);
 spectrum_workspace_t spectrum_workspace(void) {
     setup_n = 0;
+    if (!spectrum_alloc()) return (spectrum_workspace_t){NULL, window, powers.mean, frame};
     return (spectrum_workspace_t){fft_data, window, powers.mean, frame};
 }
 
-static int16_t twiddles[MAX_FFT] __attribute__((aligned(16))) SPEC_STORAGE;
+static int16_t *twiddles;
+
+static bool spectrum_alloc(void) {
+    if (!fft_data)
+        fft_data = heap_caps_aligned_alloc(16, sizeof(int16_t) * 2 * MAX_FFT, MALLOC_CAP_8BIT);
+    if (!twiddles)
+        twiddles = heap_caps_aligned_alloc(16, sizeof(int16_t) * MAX_FFT, MALLOC_CAP_8BIT);
+    return fft_data && twiddles;
+}
+
 bool spectrum_fft_init(void) {
+    if (!spectrum_alloc()) return false;
     if (!ready) ready = dsps_fft2r_init_sc16(twiddles, MAX_FFT) == ESP_OK;
     return ready;
+}
+
+static void spectrum_poll_none(void *context) { (void)context; }
+
+bool spectrum_snapshot(const uint32_t *words, unsigned n, uint8_t *codes) {
+    if (!words || !codes || n < 256 || n > MAX_FFT || (n & (n - 1))) return false;
+    if (!spectrum_fft_init()) return false;
+    if (setup_n != n) {
+        for (unsigned j = 0; j < n; j++)
+            window[j] = (int16_t)lrintf(16383.5f * (1 - cosf(2 * M_PI * j / n)));
+        setup_n = n;
+    }
+    for (unsigned j = 0; j < n; j++) {
+        int32_t i = ((int32_t)(words[j] << 22) >> 22), q = ((int32_t)(words[j] << 12) >> 22);
+        fft_data[2 * j] = clamp16((i * window[j]) >> 9);
+        fft_data[2 * j + 1] = clamp16((q * window[j]) >> 9);
+    }
+    spectrum_fft_poll(fft_data, n, dsps_fft_w_table_sc16, spectrum_poll_none, NULL);
+    spectrum_dc_t dc = {0};
+    spectrum_dc_apply(&dc, fft_data, n);
+    unsigned bin = 0;
+    for (unsigned j = 0; j < n; j++) {
+        codes[bin] = spectrum_power_code(spectrum_complex_power(fft_data[2 * j], fft_data[2 * j + 1]));
+        unsigned bit = n >> 1;
+        while (bin & bit) {
+            bin ^= bit;
+            bit >>= 1;
+        }
+        bin ^= bit;
+    }
+    return true;
 }
 
 static const unsigned rates[] = {

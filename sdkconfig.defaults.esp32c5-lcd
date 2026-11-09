@@ -1,0 +1,2 @@
+# Local ST7789 front panel on the ESP32-C5.
+CONFIG_ESP_SDR_LOCAL_UI=y

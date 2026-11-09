@@ -68,3 +68,18 @@ menu "ESP-SDR transport"
             LED support; the ESP32-C5-DevKitC-1 puts its RGB LED on GPIO27.
 
 endmenu
+
+menu "ESP-SDR local UI"
+
+    config ESP_SDR_LOCAL_UI
+        bool "Local LCD front panel (ST7789 + keys)"
+        depends on IDF_TARGET_ESP32C5
+        default n
+        help
+            Drive a 320x240 ST7789 SPI panel with a local spectrum/waterfall
+            display and five front-panel keys. The panel and the host burst
+            protocol share the radio through a lock, so either can run while
+            the other is idle. This locks the panel wiring to the board
+            definitions in main/local_ui/board_c5_lcd.h.
+
+endmenu

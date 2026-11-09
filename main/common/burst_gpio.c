@@ -13,6 +13,9 @@
 #if CONFIG_IDF_TARGET_ESP32S2
 #include "soc/usb_pins.h"
 #endif
+#if CONFIG_ESP_SDR_LOCAL_UI
+#include "board_c5_lcd.h"
+#endif
 
 #define PIN(n)            (UINT64_C(1) << (n))
 #define PINS(first, last) ((PIN((last) + 1) - 1) & ~(PIN(first) - 1))
@@ -55,6 +58,10 @@ static uint64_t excluded_pins(void) {
     /* The status LED's line belongs to the RMT peripheral, not to GPIO control. */
     const int led_pin = burst_led_owned_pin();
     if (led_pin >= 0) mask |= PIN(led_pin);
+#if CONFIG_ESP_SDR_LOCAL_UI
+    /* The local panel owns its LCD, keys and buzzer exclusively. */
+    mask |= UI_RESERVED_PINS;
+#endif
     return mask;
 }
 

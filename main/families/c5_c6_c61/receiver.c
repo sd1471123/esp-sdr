@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "heap_memory_layout.h"
 #include "nvs_flash.h"
@@ -35,6 +36,10 @@
 #endif
 #include "rx_tuning.h"
 #include "rx_recalibration.h"
+#if CONFIG_ESP_SDR_LOCAL_UI
+#include "local_ui.h"
+#include "ui_backend.h"
+#endif
 extern void phy_stop_tx_tone(unsigned);
 extern void phy_pbus_workmode(void);
 extern void phy_pbus_xpd_rx_on(unsigned);
@@ -44,6 +49,13 @@ extern void phy_chip_set_chan(unsigned, unsigned);
 extern void phy_rx_filter_mode(unsigned);
 static unsigned frequency_mhz = 2412;
 static bool rx_ready;
+#if CONFIG_ESP_SDR_LOCAL_UI
+/* Serializes the RF/PHY and the shared FFT workspace between the local panel
+ * and the host burst protocol. */
+static SemaphoreHandle_t rf_lock;
+static volatile bool host_busy;
+static volatile int64_t host_last_us = -20000000;
+#endif
 #if CONFIG_IDF_TARGET_ESP32C5
 static unsigned rx_channel_mode;
 #endif
@@ -133,10 +145,10 @@ extern unsigned phy_chip_i2c_readReg(unsigned, unsigned, unsigned);
 extern void phy_i2c_writeReg(unsigned, unsigned, unsigned, unsigned);
 static bool probe_capture;
 #endif
-static bool acquire_iq(unsigned n, unsigned divider, unsigned *capture_us) {
+static bool acquire_iq(unsigned n, unsigned divider, unsigned *capture_us, bool report) {
 #if CONFIG_IDF_TARGET_ESP32C6
     if (divider != 0 && divider != 1 && divider != 6) {
-        reply("ERR rate\n");
+        if (report) reply("ERR rate\n");
         return false;
     }
 #endif
@@ -188,18 +200,18 @@ static bool acquire_iq(unsigned n, unsigned divider, unsigned *capture_us) {
     REG_WRITE(SRAM_OWNER_REG, owner);
     rx_analog_restore(analog_saved);
     if (!done) {
-        reply("ERR capture_timeout\n");
+        if (report) reply("ERR capture_timeout\n");
         return false;
     }
     for (unsigned j = 0; j < n; j++) {
         if (IQ_BUFFER[j] == 0xa5a0055au) {
-            reply("ERR capture_timeout\n");
+            if (report) reply("ERR capture_timeout\n");
             return false;
         }
     }
     for (unsigned j = 0; j < 4; j++) {
         if (IQ_BUFFER[n + j] != (0x5a5aa5a5u ^ j)) {
-            reply("ERR capture_overrun\n");
+            if (report) reply("ERR capture_overrun\n");
             return false;
         }
     }
@@ -208,16 +220,38 @@ static bool acquire_iq(unsigned n, unsigned divider, unsigned *capture_us) {
 }
 
 static bool spectrum_acquire(unsigned n, unsigned rate, const uint32_t **data, unsigned *elapsed) {
-    bool ok = acquire_iq(n, rate, elapsed);
+    bool ok = acquire_iq(n, rate, elapsed, true);
     *data = IQ_BUFFER;
     return ok;
 }
+
+#if CONFIG_ESP_SDR_LOCAL_UI
+bool sdr_ui_spectrum(unsigned mhz, unsigned n, unsigned rate_code, uint8_t *codes, unsigned *elapsed_us) {
+    if (!rf_lock || xSemaphoreTake(rf_lock, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+    if (mhz != frequency_mhz) {
+        frequency_mhz = mhz;
+        rx_ready = false;
+    }
+    unsigned elapsed = 0;
+    bool ok = acquire_iq(n, rate_code, &elapsed, false) && spectrum_snapshot(IQ_BUFFER, n, codes);
+    xSemaphoreGive(rf_lock);
+    if (elapsed_us) *elapsed_us = elapsed;
+    return ok;
+}
+
+unsigned sdr_ui_frequency(void) { return frequency_mhz; }
+
+bool sdr_ui_host_active(void) {
+    return host_busy || usb_serial_jtag_is_connected() ||
+           esp_timer_get_time() - host_last_us < 20000000LL;
+}
+#endif
 
 #include "ring_probe.h"
 
 static bool capture(unsigned n, unsigned divider, unsigned format) {
     unsigned elapsed;
-    if (!acquire_iq(n, divider, &elapsed)) return false;
+    if (!acquire_iq(n, divider, &elapsed, true)) return false;
     return burst_send_capture(n, format, elapsed);
 }
 
@@ -274,6 +308,7 @@ static bool ring_test(const char *line) {
 #endif
 
 static void handle_command(char *line);
+static void handle_command_inner(char *line);
 
 void app_main(void) {
 
@@ -284,6 +319,10 @@ void app_main(void) {
         e = nvs_flash_init();
     }
     ESP_ERROR_CHECK(e);
+#if CONFIG_ESP_SDR_LOCAL_UI
+    rf_lock = xSemaphoreCreateMutex();
+    host_last_us = esp_timer_get_time() - 20000000;
+#endif
     usb_serial_jtag_driver_config_t usb = {.tx_buffer_size = 512, .rx_buffer_size = 512};
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb));
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -303,13 +342,29 @@ void app_main(void) {
     (void)usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(100));
     ESP_ERROR_CHECK(usb_serial_jtag_driver_uninstall());
     burst_serial_init();
+#if CONFIG_ESP_SDR_LOCAL_UI
+    local_ui_start();
+#endif
     burst_serial_serve(handle_command);
 }
 
 #define BURST_MAX_RATE (CONFIG_IDF_TARGET_ESP32C6 ? 6 : 5)
 #include "burst_commands.h"
 
+#if CONFIG_ESP_SDR_LOCAL_UI
 static void handle_command(char *line) {
+    if (rf_lock) xSemaphoreTake(rf_lock, portMAX_DELAY);
+    host_busy = true;
+    handle_command_inner(line);
+    host_last_us = esp_timer_get_time();
+    host_busy = false;
+    if (rf_lock) xSemaphoreGive(rf_lock);
+}
+#else
+static void handle_command(char *line) { handle_command_inner(line); }
+#endif
+
+static void handle_command_inner(char *line) {
     if (burst_version_command(line)) return;
     if (burst_gpio_command(line)) return;
     if (burst_led_command(line)) return;

@@ -19,6 +19,11 @@ endif()
 set(receiver "${target_dir}/receiver.c")
 set(sources "common/burst_serial.c" "common/burst_gpio.c" "common/burst_beep.c" "common/burst_led.c" "common/burst_version.c" "common/spectrum_stats.c" "common/rx_recalibration.c" "common/rx_calibration_state.c")
 set(dependencies esp_driver_gpio esp_driver_rmt esp_hw_support esp_phy esp_wifi nvs_flash esp_timer esp_driver_uart esp-dsp)
+# The component requirements are expanded before sdkconfig exists, so gate on
+# the target rather than on CONFIG_ESP_SDR_LOCAL_UI here.
+if(IDF_TARGET STREQUAL "esp32c5")
+    list(APPEND dependencies esp_driver_spi)
+endif()
 option(RING_PROBE "Build bounded experimental ring diagnostics (never package)" OFF)
 if(IDF_TARGET STREQUAL "esp32c61" OR IDF_TARGET STREQUAL "esp32c6")
     list(APPEND sources "common/ring_capture.c")
@@ -62,9 +67,26 @@ if(IDF_TARGET STREQUAL "esp32c61" OR IDF_TARGET STREQUAL "esp32s31")
     list(APPEND sources "common/burst_gain_table.c")
 endif()
 
-idf_component_register(SRCS "${receiver}" ${sources}
+set(ui_sources)
+set(ui_includes)
+if(CONFIG_ESP_SDR_LOCAL_UI)
+    if(NOT IDF_TARGET STREQUAL "esp32c5")
+        message(FATAL_ERROR "CONFIG_ESP_SDR_LOCAL_UI requires esp32c5")
+    endif()
+    list(APPEND ui_sources
+        "local_ui/st7789.c"
+        "local_ui/font5x7.c"
+        "local_ui/font7x12.c"
+        "local_ui/settings.c"
+        "local_ui/buttons.c"
+        "local_ui/buzzer.c"
+        "local_ui/ui.c")
+    list(APPEND ui_includes "local_ui")
+endif()
+
+idf_component_register(SRCS "${receiver}" ${sources} ${ui_sources}
     LDFRAGMENTS ${fragments}
-    PRIV_INCLUDE_DIRS "common" ${target_includes} "diagnostics"
+    PRIV_INCLUDE_DIRS "common" ${target_includes} "diagnostics" ${ui_includes}
     REQUIRES ${dependencies})
 
 # Regenerate at build time (not only CMake configure time). The embedded record
