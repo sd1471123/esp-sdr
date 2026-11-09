@@ -110,9 +110,29 @@ const F5 = Uint8Array.from(atob("AAAAAAAAAAQEBAQABAAKCgAAAAAAAAgeCg8EAAAOAg4MDgA
 const F7 = Uint8Array.from(atob("AAAAAAAAAAAAAAAAGBgYGBgQEAAYGAAAZGRkZAAAAAAAAAAAWEhIfiwkfzYSEgAAEHwWFhx4cFByPBAQDgsLDgAAYBAQYAAAGAQEDBweM2NmfAAAGBgYGAAAAAAAAAAAEBAYGAgIGBgYECAACBgQMDAwMBAYCAwAEFI8PFIQAAAAAAAAABAQEH5+EBAQAAAAAAAAAAAAABgYGAgAAAAAAAA8PAAAAAAAAAAAAAAAABgYGAAAQEAgIDAQGAgMBAQCOGRmRlZWRmZkOAAAGBAQEBAQEBAQfgAAPGJgYGAwGAwGfgAAPGJgYDhgQEBiPAAAcHB4bGZifmBgYAAAfgYGPmBgQGBiHAAAOAQGPmZGRkZkOAAAfmBgMDAwGBgIDAAAOGRGZDxmRkZmPAAAPGZmZmZmfEBgHAAAAAAAGBgYABgYGAAAAAAAGBgYABgYGAgAAAAAcBwGHHAAAAAAAAB+fgAAfn4AAAAAAAACDnhgcA4CAAAAOGBgMBAYGAAYGAAAOEQCckkJCUlyAgR4GDg8LGRkfkZCQwAAPmZGZj5GRkZGPgAAOAwEBgYGBgQMOAAAHmZGRkZGRkZmHgAAfgYGBn4GBgYGfgAAfgYGBn4GBgYGBgAAOAwGBgZmRkZMeAAARkZGRn5GRkZGRgAAfhgYGBgYGBgYfgAAeGBgYGBgYGBgPAAARmY2Hh4+NmZmRgAABAQEBAQEBAQEfAAAZmZuelpaQkJCQgAARkZOTlpScmJiYgAAOGRGRkZGRkZkOAAAPmZGRmY+BgYGBgAAOGRGRkZGRkZkOGAAPmZGZmY+ZmZGRgAAOEYGDjx4YEBiPAAAfhgYGBgYGBgYGAAARkZGRkZGRkZmPAAAQkZGZmRkLDw4OAAAAwMDGlpabm5mZgAARmZsPBgYPGxmQgAAQ0ZmLDgYGBgYGAAAfmBgcDgYHA4GfgAAGBgYGBgYGBgYGDgAAgQEDAgYEDAgIEBAEBAQEBAQEBAQEBwAGDxkQgAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAA4YEB8RkZmfAAABgY2bkZGRkZuNgAAAAA4DAQGBgQMOAAAQEB8ZmZmZmZmfAAAAAA4ZkZ+BgYGOAAAGBh+GBgYGBgYGAAAAAB8ZmZGRmZmfEBgBgY+ZmZmZmZmZgAAEAAcEBAQEBAQfgAAMAA8MDAwMDAwMDAQBgZmNh4ePmZmRgAAGBgYGBgYGBgYcAAAAAB+WlJSUlJSUgAAAAA+ZmZmZmZmZgAAAAA4ZEZGRkZkOAAAAAA2bkZGRkZuNgYGAAB8ZmZmZmZmfEBAAABsHAwMDAwMDAAAAAA8BAY8eGBgOAAAGBh+GBgYGBgYcAAAAABmZmZmZmZmfAAAAABGRmZkLDw4GAAAAAADAxpaWm5mZgAAAABmbDwYODxkRgAAAABGRmZsLDg4GBgYAAB+YHA4GAwOfgAAEBgYGBgOGBgYGBBwEBAQEBAQEBAQEBAQGBgYGBBwEBgYGBgOAAAAAA5+YAAAAAAA"), c => c.charCodeAt(0));
 
 /* ---- 固件常量 ---- */
-const COL_BG = 0x0000, COL_PANEL = 0x18C3, COL_GRID = 0x2945, COL_DIM = 0x8410;
-const COL_TEXT = 0xFFFF, COL_ACCENT = 0x07E0, COL_PEAK = 0xFFE0;
-const COL_USB = 0x07FF, COL_MUTE = 0xF800, COL_CELL = 0x2104;
+/* ---- 色彩：取自定稿设计（深海军蓝 + 青色 + 琥珀） ---- */
+function hexRGB(h) {
+  return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+}
+function mix(fg, alpha, bg) {
+  return [0, 1, 2].map(i => Math.round(fg[i] * alpha + bg[i] * (1 - alpha)));
+}
+const BG_RGB = hexRGB('#070b0f'), SPEC_RGB = hexRGB('#080c11'), PANEL_RGB = hexRGB('#11161d'),
+  STRIP_RGB = hexRGB('#0c1117');
+const C = {
+  bg: BG_RGB, specBg: SPEC_RGB, panel: PANEL_RGB, strip: STRIP_RGB,
+  grid: mix([255, 255, 255], 0.065, SPEC_RGB),
+  dim: hexRGB('#5c6675'), muted: hexRGB('#b9c3d3'), text: hexRGB('#e8edf4'),
+  accent: hexRGB('#00c8ff'), trace: hexRGB('#00d4ff'),
+  glow: mix(hexRGB('#00d4ff'), 0.35, SPEC_RGB),
+  peak: hexRGB('#ffb347'), green: hexRGB('#6ef0b0'), red: hexRGB('#ff6b6b'),
+  usb: hexRGB('#00c8ff'),
+  tintC: mix(hexRGB('#00c8ff'), 0.16, STRIP_RGB),
+  tintO: mix(hexRGB('#ffb347'), 0.12, PANEL_RGB),
+  tintG: mix(hexRGB('#6ef0b0'), 0.12, PANEL_RGB),
+  callout: mix(hexRGB('#0a141c'), 0.94, SPEC_RGB),
+  calloutText: hexRGB('#dff8ff')
+};
 
 const FFT_BINS = 256;
 const SWEEP_PERIOD_MS = 80;
@@ -122,15 +142,6 @@ const LONG_PRESS_MS = 5000;
 const REPEAT_DELAY_MS = 400;
 const REPEAT_PERIOD_MS = 200;
 const CHORD_WINDOW_MS = 350;
-
-function rgb565(v) {
-  return [((v >> 11) & 0x1f) * 255 / 31 | 0, ((v >> 5) & 0x3f) * 255 / 63 | 0, (v & 0x1f) * 255 / 31 | 0];
-}
-const C = {
-  bg: rgb565(COL_BG), panel: rgb565(COL_PANEL), grid: rgb565(COL_GRID), dim: rgb565(COL_DIM),
-  text: rgb565(COL_TEXT), accent: rgb565(COL_ACCENT), peak: rgb565(COL_PEAK),
-  usb: rgb565(COL_USB), mute: rgb565(COL_MUTE), cell: rgb565(COL_CELL)
-};
 
 /* ---- 状态（对应 ui_settings_t + ui.c 静态变量） ---- */
 const DEFAULTS = { band: 1, mode: 0, landscape: 1, buzz: 1, top_db: -26, bottom_db: -105 };
@@ -144,6 +155,7 @@ let acqTick = 0;
 
 const codes = new Uint8Array(FFT_BINS);
 const peak = new Uint8Array(FFT_BINS);
+const chPk = new Uint8Array(36), chAct = new Uint8Array(36), chDet = new Uint8Array(36);
 let haveData = false;
 let pk_db = 0, act_db = 0, det_pct = 0;
 
@@ -203,6 +215,51 @@ function text(x, y, s, fg, bg, big) {
       }
       if (i + 1 < len) { setPx(cx, y + row, bg); cx++; }
     }
+  }
+}
+
+function textW(s) { return s.length * 6 - 1; }
+
+function fillRoundRect(x, y, w, h, r, color) {
+  r = Math.min(r, 5);
+  for (let dy = 0; dy < h; dy++) {
+    let inset = 0;
+    if (dy < r || dy >= h - r) {
+      const k = dy < r ? r - 1 - dy : dy - (h - r);
+      let s = 0;
+      while ((s + 1) * (s + 1) <= r * r - k * k) s++;
+      inset = r - s;
+    }
+    if (inset * 2 >= w) continue;
+    fillRect(x + inset, y + dy, w - inset * 2, 1, color);
+  }
+}
+
+function roundRectBorder(x, y, w, h, r, color) {
+  r = Math.min(r, 5);
+  fillRect(x + r, y, w - 2 * r, 1, color);
+  fillRect(x + r, y + h - 1, w - 2 * r, 1, color);
+  fillRect(x, y + r, 1, h - 2 * r, color);
+  fillRect(x + w - 1, y + r, 1, h - 2 * r, color);
+  for (let dy = 0; dy < r; dy++) {
+    const k = r - 1 - dy;
+    let s = 0;
+    while ((s + 1) * (s + 1) <= r * r - k * k) s++;
+    const inset = r - s;
+    setPx(x + inset, y + dy, color);
+    setPx(x + w - 1 - inset, y + dy, color);
+    setPx(x + inset, y + h - 1 - dy, color);
+    setPx(x + w - 1 - inset, y + h - 1 - dy, color);
+  }
+}
+
+function drawMuteIcon(right, cy) {
+  const x = right - 11;
+  fillRect(x, cy - 1, 3, 3, C.dim);
+  fillRect(x + 2, cy - 3, 2, 7, C.dim);
+  for (let i = 0; i < 4; i++) {
+    setPx(x + 6 + i, cy - 2 + i, C.red);
+    setPx(x + 9 - i, cy - 2 + i, C.red);
   }
 }
 
@@ -289,94 +346,170 @@ function acquire() {
     else if (peak[j]) peak[j]--;
   }
   analyse();
+  const lv = Math.max(0, Math.min(100, Math.trunc((pk_db - (cfg.bottom_db + 4)) * 100 / 50)));
+  const ac = Math.max(0, Math.min(100, Math.trunc(act_db * 100 / 60)));
+  chPk[channel] = lv;
+  chAct[channel] = ac;
+  chDet[channel] = Math.max(0, Math.min(100, det_pct));
   waterfallPush();
 }
 
 /* ---- 瀑布调色板（palette_init 逐项一致） ---- */
+const WF_STOPS = [[16, 42, 67], [14, 76, 107], [10, 124, 138], [18, 179, 168],
+                  [142, 212, 60], [255, 210, 63], [255, 140, 66], [232, 70, 58]];
 const wfPalette = [];
 for (let i = 0; i < 256; i++) {
-  let r = 0, g = 0, b = 0;
-  if (i < 64) b = i * 4;
-  else if (i < 128) { b = 255; g = (i - 64) * 4; }
-  else if (i < 192) { g = 255; b = 255 - (i - 128) * 4; r = (i - 128) * 4; }
-  else { r = 255; g = 255 - (i - 192) * 4; }
-  wfPalette.push([r, g, b]);
+  const pos = Math.floor(i * 7 * 256 / 255);
+  let seg = pos >> 8, f = pos & 0xff;
+  if (seg > 6) { seg = 6; f = 255; }
+  const a = WF_STOPS[seg], b = WF_STOPS[seg + 1];
+  wfPalette.push([(a[0] * (256 - f) + b[0] * f) >> 8,
+                  (a[1] * (256 - f) + b[1] * f) >> 8,
+                  (a[2] * (256 - f) + b[2] * f) >> 8]);
 }
 
 /* ---- 渲染：顺序与 ui.c render() 相同 ---- */
 function renderTop() {
-  fillRect(0, 0, W, L.top_h, C.panel);
+  const top = L.top_h;
+  fillRect(0, 0, W, top, C.panel);
+  fillRect(0, top - 1, W, 1, C.bg);
+  const band = bandLabel();
+  text(6, (top - 12) / 2 | 0, band, C.text, C.panel, true);
+  const live = cfg.mode === 1;
+  const tint = live ? C.tintG : C.tintO;
+  const edge = live ? C.green : C.peak;
+  const bx = 6 + band.length * 8 - 1 + 5;
+  const bw = 40, bh = 16, by = (top - bh) / 2 | 0;
+  fillRoundRect(bx, by, bw, bh, 4, tint);
+  roundRectBorder(bx, by, bw, bh, 4, edge);
+  const mode = live ? "LIVE" : "SWEEP";
+  text(bx + ((bw - textW(mode)) / 2 | 0), (top - 7) / 2 | 0, mode, edge, tint, false);
+  const readout = W >= 300 ? `PK${pk_db} ACT${act_db} DET${det_pct}%`
+                           : `P${pk_db} A${act_db} D${det_pct}%`;
+  text(bx + bw + 6, (top - 7) / 2 | 0, readout, C.muted, C.panel, false);
   const shown = usbActive ? hostFreq : bandMhz(channel);
-  text(3, 2, bandLabel() + " CH" + bandNumber(channel), C.text, C.panel, false);
-  text(3, L.top_h - 10, (cfg.mode === 0 ? "SWP" : "LIVE") + " " + cfg.top_db + "/" + cfg.bottom_db,
-    C.dim, C.panel, false);
-  text(104, (L.top_h - 12) / 2 | 0, String(shown), C.text, C.panel, true);
-  text(W - 34, 2, "PK" + pk_db, C.peak, C.panel, false);
-  if (usbActive) text(W - 34, L.top_h - 10, "USB", C.usb, C.panel, false);
-  else text(W - 34, L.top_h - 10, "A" + act_db + "D" + det_pct, C.text, C.panel, false);
+  const right = `ch${bandNumber(channel)} ${shown}M`;
+  const tx = W - 6 - textW(right);
+  text(tx, (top - 7) / 2 | 0, right, C.text, C.panel, false);
+  if (muted) drawMuteIcon(tx > 12 ? tx - 6 : W - 2, top / 2 | 0);
 }
 
 function renderSpectrum() {
-  const h = L.spec_h;
-  for (let y = 0; y < h; y += (h / 4) | 0)
-    for (let x = 0; x < W; x++) setPx(x, L.spec_y + y, C.grid);
-  for (let x = 0; x < W; x += (W / 8) | 0)
-    for (let y = 0; y < h; y++) setPx(x, L.spec_y + y, C.grid);
-  if (haveData && !muted) {
-    for (let x = 0; x < W; x++) {
-      const b = displayBin(x, W);
+  const h = L.spec_h, w = W;
+  fillRect(0, L.spec_y, w, h, C.specBg);
+  const range = Math.max(5, cfg.top_db - cfg.bottom_db);
+  const yOf = db => h - (db - cfg.bottom_db) * h / range;
+  for (let db = -120; db <= 0; db += 20) {
+    if (db < cfg.bottom_db || db > cfg.top_db) continue;
+    const y = yOf(db) | 0;
+    if (y >= 0 && y < h) fillRect(0, L.spec_y + y, w, 1, C.grid);
+  }
+  for (let k = 1; k < 4; k++) fillRect((w * k / 4) | 0, L.spec_y, 1, h, C.grid);
+  if (haveData) {
+    let prev = -1;
+    for (let x = 0; x < w; x++) {
+      const b = displayBin(x, w);
       const mean = levelOf(codes[b], h);
-      const hold = Math.max(mean, levelOf(peak[b], h));
-      for (let y = h - mean; y < h; y++) setPx(x, L.spec_y + y, C.accent);
-      for (let y = h - hold; y < h - mean; y++) if (y >= 0) setPx(x, L.spec_y + y, C.peak);
+      let hold = levelOf(peak[b], h);
+      if (hold < mean) hold = mean;
+      let y = h - 1 - mean;
+      if (y < 0) y = 0;
+      const lo = prev < 0 ? y : Math.min(prev, y);
+      const hi = prev < 0 ? y : Math.max(prev, y);
+      for (let yy = lo; yy <= hi; yy++) setPx(x, L.spec_y + yy, C.trace);
+      prev = y;
+      if (hold > mean && Math.floor(x / 5) % 2 < 3) {
+        const ph = h - 1 - hold;
+        if (ph >= 0) setPx(x, L.spec_y + ph, C.peak);
+      }
     }
+  }
+  for (let db = -120; db <= 0; db += 20) {
+    if (db < cfg.bottom_db || db > cfg.top_db) continue;
+    const y = yOf(db) | 0;
+    if (y <= 9 || y >= h - 11) continue;
+    text(3, L.spec_y + y - 8, String(db), C.dim, C.specBg, false);
+  }
+  const shown = usbActive ? hostFreq : bandMhz(channel);
+  text(4, L.spec_y + h - 10, String(shown - 10), C.dim, C.specBg, false);
+  const hiTxt = String(shown + 10);
+  text(w - 4 - textW(hiTxt), L.spec_y + h - 10, hiTxt, C.dim, C.specBg, false);
+  if (cfg.mode === 1) {
+    for (let y = 0; y < h; y += 5) fillRect(w / 2 | 0, L.spec_y + y, 1, Math.min(3, h - y), C.glow);
+    text(4, L.spec_y + 4, "LIVE 20M", C.glow, C.specBg, false);
+  } else {
+    const lab = `ch${bandNumber(channel)} ${shown}M  ${det_pct}%`;
+    const lw = textW(lab) + 10;
+    fillRoundRect(3, L.spec_y + 5, lw, 13, 3, C.callout);
+    roundRectBorder(3, L.spec_y + 5, lw, 13, 3, C.accent);
+    text(8, L.spec_y + 8, lab, C.calloutText, C.callout, false);
   }
 }
 
 function renderWaterfall() {
+  const range = Math.max(5, cfg.top_db - cfg.bottom_db);
   for (let r = 0; r < L.wf_h; r++) {
     const src = ((wfNext + r) % L.wf_h) * WF_STRIDE;
-    for (let x = 0; x < W; x++) setPx(x, L.wf_y + r, wfPalette[wf[src + x]]);
+    for (let x = 0; x < W; x++) {
+      const db = (wf[src + x] / 2 | 0) - 84;
+      const idx = Math.max(0, Math.min(255, Math.trunc((db - cfg.bottom_db) * 255 / range)));
+      setPx(x, L.wf_y + r, wfPalette[idx]);
+    }
   }
 }
 
 function renderStrip() {
-  fillRect(0, L.strip_y, W, L.strip_h, C.panel);
-  const count = bandCount();
-  const cell = W / count | 0;
-  let selected = usbActive ? (sel_x * count / W | 0)
-    : (cfg.mode === 0 ? scan_index : channel);
+  const top = L.strip_y, count = bandCount();
+  fillRect(0, top, W, L.strip_h, C.strip);
+  fillRect(0, top, W, 1, C.bg);
+  const margin = 4, gap = count > 20 ? 0 : 1;
+  const cw = Math.floor((W - margin * 2 - gap * (count - 1)) / count);
+  const y = top + 3, h = L.strip_h - 6;
+  const detH = 7, actH = 7, barGap = 2;
+  const actY = y + h - actH, detY = actY - barGap - detH;
+  const labelY = y + Math.floor((detY - y - 7) / 2);
+  let selected = usbActive ? Math.floor(sel_x * count / W) : (cfg.mode === 0 ? scan_index : channel);
   if (selected >= count) selected = count - 1;
   for (let i = 0; i < count; i++) {
-    const x = i * cell;
-    const fill = i === selected ? C.accent : C.cell;
-    fillRect(x + 1, L.strip_y + 3, cell - 2, L.strip_h - 6, fill);
-    if (cell >= 16) {
+    const x = margin + i * (cw + gap);
+    if (i === selected) {
+      fillRoundRect(x, y, cw, h, 2, C.tintC);
+      roundRectBorder(x, y, cw, h, 2, C.accent);
+    }
+    const track = cw > 2 ? cw - 2 : 1;
+    const det = chDet[i], act = chAct[i];
+    fillRect(x + 1, detY, track, detH, [41, 45, 51]);
+    const dc = chPk[i] > 70 ? C.red : chPk[i] > 40 ? C.peak : C.green;
+    if (det > 2) fillRect(x + 1, detY, Math.max(1, Math.floor(track * det / 100)), detH, dc);
+    fillRect(x + 1, actY, track, actH, [29, 34, 39]);
+    if (act > 2) fillRect(x + 1, actY, Math.max(1, Math.floor(track * act / 100)), actH, C.usb);
+    const grp = count <= 13 || i % 4 === 0 || i + 1 === count;
+    const dist = Math.abs(selected - i);
+    if (grp && i !== selected && (count <= 13 || dist > 1)) {
       const label = String(bandNumber(i));
-      const tw = label.length * 6 - 1;
-      text(x + ((cell - tw) / 2 | 0), L.strip_y + ((L.strip_h - 7) / 2 | 0), label,
-        i === selected ? C.bg : C.dim, fill, false);
+      const lx = Math.max(0, Math.floor(x + cw / 2 - textW(label) / 2));
+      text(lx, labelY, label, C.dim, C.strip, false);
     }
   }
+  {
+    const x = margin + selected * (cw + gap);
+    const label = String(bandNumber(selected));
+    const lx = Math.max(0, Math.floor(x + cw / 2 - textW(label) / 2));
+    text(lx, labelY, label, C.text, C.tintC, false);
+  }
   if (usbActive) {
-    fillRect(W / 2 - 18, L.strip_y + 2, 36, L.strip_h - 4, C.panel);
-    text(W / 2 - 16, L.strip_y + ((L.strip_h - 7) / 2 | 0), "USB", C.usb, C.panel, false);
+    fillRect(W / 2 - 18, top + 2, 36, L.strip_h - 4, C.strip);
+    text(W / 2 - 16, top + Math.floor((L.strip_h - 7) / 2), "USB", C.usb, C.strip, false);
   }
 }
 
 function renderOverlays() {
-  if (muted) {
-    fillRect(W / 2 - 28, L.spec_y + (L.spec_h / 2 | 0) - 6, 56, 13, C.mute);
-    text(W / 2 - 24, L.spec_y + (L.spec_h / 2 | 0) - 4, "MUTE", C.text, C.mute, false);
-  }
-  if (!haveData && !usbActive) {
-    text(W / 2 - 27, L.spec_y + (L.spec_h / 2 | 0) - 3, "SCANNING", C.dim, C.bg, false);
-  }
   if (keys.rot.down && !usbActive) {
     const elapsed = nowMs() - keys.rot.pressedAt;
     const left = elapsed >= LONG_PRESS_MS ? 0 : Math.ceil((LONG_PRESS_MS - elapsed) / 1000);
-    fillRect(6, L.spec_y + 4, 88, 15, C.panel);
-    text(9, L.spec_y + 7, "RESET " + left, C.peak, C.panel, false);
+    fillRoundRect(6, L.spec_y + 4, 88, 15, 3, C.panel);
+    roundRectBorder(6, L.spec_y + 4, 88, 15, 3, C.peak);
+    text(9, L.spec_y + 8, "RESET " + left, C.peak, C.panel, false);
   }
 }
 
@@ -515,6 +648,7 @@ function toggleBand() {
   cfg.band = cfg.band === 1 ? 0 : 1;
   channel = scan_index = 0;
   peak.fill(0);
+  chPk.fill(0); chAct.fill(0); chDet.fill(0);
   haveData = false;
   saveCfg();
   buzz('band');
@@ -544,6 +678,7 @@ function resetDefaults() {
   allocBuffer();
   wfNext = 0;
   peak.fill(0);
+  chPk.fill(0); chAct.fill(0); chDet.fill(0);
   wf.fill(0);
   haveData = false;
   saveCfg();

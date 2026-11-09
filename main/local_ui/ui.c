@@ -24,16 +24,26 @@
 #define MASK_BYTES    (320 * 140 / 4)
 #define TEXT_PIXELS   (320 * 12)
 
-#define COL_BG    0x0000
-#define COL_PANEL 0x18C3
-#define COL_GRID  0x2945
-#define COL_DIM   0x8410
-#define COL_TEXT  0xFFFF
-#define COL_ACCENT 0x07E0
-#define COL_PEAK  0xFFE0
-#define COL_USB   0x07FF
-#define COL_MUTE  0xF800
-#define COL_CELL  0x2104
+/* Palette taken from the approved panel design (dark navy + cyan + amber). */
+#define COL_BG      0x0862 /* #070b0f */
+#define COL_SPEC_BG 0x0862 /* #080c11 */
+#define COL_PANEL   0x10A3 /* #11161d */
+#define COL_STRIP   0x0882 /* #0c1117 */
+#define COL_GRID    0x18E4 /* rgba(255,255,255,.065) on spec bg */
+#define COL_DIM     0x5B2E /* #5c6675 */
+#define COL_MUTED   0xBE1A /* #b9c3d3 */
+#define COL_TEXT    0xE75D /* #e8edf4 */
+#define COL_ACCENT  0x063F /* #00c8ff */
+#define COL_TRACE   0x069F /* #00d4ff */
+#define COL_GLOW    0x030F /* cyan @35% */
+#define COL_PEAK    0xFD89 /* #ffb347 */
+#define COL_GREEN   0x6F76 /* #6ef0b0 */
+#define COL_RED     0xFB4D /* #ff6b6b */
+#define COL_TINT_C  0x0967 /* cyan 16% on strip bg */
+#define COL_TINT_O  0x2924 /* amber 12% on panel */
+#define COL_TINT_G  0x1A25 /* green 12% on panel */
+#define COL_USB     0x07FF
+#define COL_MUTE    0xF800
 
 #define SWEEP_PERIOD_US  80000
 #define RENDER_PERIOD_US 100000
@@ -67,7 +77,8 @@ static uint16_t *text_buf;
 static uint16_t wf_palette[256];
 static unsigned wf_next;
 
-static const uint16_t spec_palette[4] = {COL_BG, COL_GRID, COL_ACCENT, COL_PEAK};
+static const uint16_t spec_palette[4] = {COL_SPEC_BG, COL_GRID, COL_TRACE, COL_PEAK};
+static uint8_t ch_pk[36], ch_act[36], ch_det[36];
 
 static unsigned band_count(void) { return cfg.band == UI_BAND_5G ? 36 : 13; }
 static unsigned band_number(unsigned idx) { return cfg.band == UI_BAND_5G ? 36 + idx * 4 : idx + 1; }
@@ -126,102 +137,252 @@ static int level_of(unsigned code, unsigned h) {
 
 static unsigned display_bin(unsigned x, unsigned w) { return (x * FFT_BINS / w + FFT_BINS / 2) % FFT_BINS; }
 
-static void render_top(unsigned w) {
-    lcd_fill_rect(0, 0, w, layout.top_h, COL_PANEL);
-    char line[32];
-    unsigned shown_mhz = usb_active ? sdr_ui_frequency() : band_mhz(channel);
-    snprintf(line, sizeof(line), "%s CH%u", cfg.band == UI_BAND_5G ? "5G" : "2.4G", band_number(channel));
-    ui_text(3, 2, line, COL_TEXT, COL_PANEL, false);
-    snprintf(line, sizeof(line), "%s %d/%d", cfg.mode == UI_MODE_SWEEP ? "SWP" : "LIVE", cfg.top_db,
-             cfg.bottom_db);
-    ui_text(3, layout.top_h - 10, line, COL_DIM, COL_PANEL, false);
-    snprintf(line, sizeof(line), "%u", shown_mhz);
-    ui_text(104, (layout.top_h - FONT7X12_H) / 2, line, COL_TEXT, COL_PANEL, true);
-    snprintf(line, sizeof(line), "PK%d", pk_db);
-    ui_text(w - 34, 2, line, COL_PEAK, COL_PANEL, false);
-    if (usb_active)
-        ui_text(w - 34, layout.top_h - 10, "USB", COL_USB, COL_PANEL, false);
-    else {
-        snprintf(line, sizeof(line), "A%dD%d", act_db, det_pct);
-        ui_text(w - 34, layout.top_h - 10, line, COL_TEXT, COL_PANEL, false);
+static unsigned text_w(const char *s) { return (unsigned)strlen(s) * (FONT5X7_W + 1) - 1; }
+
+/* Filled rounded rectangle (radius <= 5), used for the mode pill, callout and
+ * the selected channel marker. */
+static void fill_round_rect(unsigned x, unsigned y, unsigned w, unsigned h, unsigned r, uint16_t color) {
+    if (r > 5) r = 5;
+    for (unsigned dy = 0; dy < h; dy++) {
+        unsigned inset = 0;
+        if (dy < r) {
+            unsigned k = r - 1 - dy, s = 0;
+            while ((s + 1) * (s + 1) <= r * r - k * k) s++;
+            inset = r - s;
+        } else if (dy >= h - r) {
+            unsigned k = dy - (h - r), s = 0;
+            while ((s + 1) * (s + 1) <= r * r - k * k) s++;
+            inset = r - s;
+        }
+        if (inset * 2 >= w) continue;
+        lcd_fill_rect(x + inset, y + dy, w - inset * 2, 1, color);
     }
 }
+
+static void round_rect_border(unsigned x, unsigned y, unsigned w, unsigned h, unsigned r, uint16_t color) {
+    if (r > 5) r = 5;
+    lcd_fill_rect(x + r, y, w - 2 * r, 1, color);
+    lcd_fill_rect(x + r, y + h - 1, w - 2 * r, 1, color);
+    lcd_fill_rect(x, y + r, 1, h - 2 * r, color);
+    lcd_fill_rect(x + w - 1, y + r, 1, h - 2 * r, color);
+    for (unsigned dy = 0; dy < r; dy++) {
+        unsigned k = r - 1 - dy, s = 0;
+        while ((s + 1) * (s + 1) <= r * r - k * k) s++;
+        unsigned inset = r - s;
+        lcd_fill_rect(x + inset, y + dy, 1, 1, color);
+        lcd_fill_rect(x + w - 1 - inset, y + dy, 1, 1, color);
+        lcd_fill_rect(x + inset, y + h - 1 - dy, 1, 1, color);
+        lcd_fill_rect(x + w - 1 - inset, y + h - 1 - dy, 1, 1, color);
+    }
+}
+
+static void draw_mute_icon(unsigned right, unsigned cy) {
+    unsigned x = right - 11;
+    lcd_fill_rect(x, cy - 1, 3, 3, COL_DIM);
+    lcd_fill_rect(x + 2, cy - 3, 2, 7, COL_DIM);
+    for (unsigned i = 0; i < 4; i++) {
+        lcd_fill_rect(x + 6 + i, cy - 2 + i, 1, 1, COL_RED);
+        lcd_fill_rect(x + 9 - i, cy - 2 + i, 1, 1, COL_RED);
+    }
+}
+
+static void render_top(unsigned w) {
+    unsigned top = layout.top_h;
+    lcd_fill_rect(0, 0, w, top, COL_PANEL);
+    lcd_fill_rect(0, top - 1, w, 1, COL_BG);
+
+    const char *band = cfg.band == UI_BAND_5G ? "5G" : "2.4G";
+    ui_text(6, (top - FONT7X12_H) / 2, band, COL_TEXT, COL_PANEL, true);
+
+    bool live = cfg.mode == UI_MODE_LIVE;
+    uint16_t tint = live ? COL_TINT_G : COL_TINT_O;
+    uint16_t edge = live ? COL_GREEN : COL_PEAK;
+    unsigned bx = 6 + (unsigned)strlen(band) * (FONT7X12_W + 1) - 1 + 5;
+    unsigned bw = 40, bh = 16, by = (top - bh) / 2;
+    fill_round_rect(bx, by, bw, bh, 4, tint);
+    round_rect_border(bx, by, bw, bh, 4, edge);
+    const char *mode = live ? "LIVE" : "SWEEP";
+    ui_text(bx + (bw - text_w(mode)) / 2, (top - FONT5X7_H) / 2, mode, edge, tint, false);
+
+    char line[40];
+    if (w >= 300)
+        snprintf(line, sizeof(line), "PK%d ACT%d DET%d%%", pk_db, act_db, det_pct);
+    else
+        snprintf(line, sizeof(line), "P%d A%d D%d%%", pk_db, act_db, det_pct);
+    ui_text(bx + bw + 6, (top - FONT5X7_H) / 2, line, COL_MUTED, COL_PANEL, false);
+
+    unsigned shown = usb_active ? sdr_ui_frequency() : band_mhz(channel);
+    snprintf(line, sizeof(line), "ch%u %uM", band_number(channel), shown);
+    unsigned tw = text_w(line);
+    unsigned tx = w > 6 + tw ? w - 6 - tw : 0;
+    ui_text(tx, (top - FONT5X7_H) / 2, line, COL_TEXT, COL_PANEL, false);
+    if (muted) draw_mute_icon(tx > 12 ? tx - 6 : w - 2, top / 2);
+}
+
 
 static void render_spectrum(unsigned w) {
     unsigned h = layout.spec_h;
     unsigned stride = (w + 3) / 4;
+    lcd_fill_rect(0, layout.spec_y, w, h, COL_SPEC_BG);
     memset(mask, 0, stride * h);
-    for (unsigned y = 0; y < h; y += h / 4)
-        for (unsigned x = 0; x < w; x++) mask_put(x, y, 1);
-    for (unsigned x = 0; x < w; x += w / 8)
+
+    int range = (int)cfg.top_db - (int)cfg.bottom_db;
+    if (range < 5) range = 5;
+
+    for (int db = -120; db <= 0; db += 20) {
+        if (db < cfg.bottom_db || db > cfg.top_db) continue;
+        int y = (int)h - (db - (int)cfg.bottom_db) * (int)h / range;
+        if (y < 0 || y >= (int)h) continue;
+        for (unsigned x = 0; x < w; x++) mask_put(x, (unsigned)y, 1);
+    }
+    for (unsigned k = 1; k < 4; k++) {
+        unsigned x = w * k / 4;
         for (unsigned y = 0; y < h; y++) mask_put(x, y, 1);
-    if (have_data && !muted) {
+    }
+
+    if (have_data) {
+        int prev = -1;
         for (unsigned x = 0; x < w; x++) {
             unsigned bin = display_bin(x, w);
             int mean = level_of(codes[bin], h);
             int hold = level_of(peak[bin], h);
             if (hold < mean) hold = mean;
-            for (int y = h - mean; y < (int)h; y++)
-                if (y >= 0) mask_put(x, (unsigned)y, 2);
-            for (int y = h - hold; y < h - mean; y++)
-                if (y >= 0) mask_put(x, (unsigned)y, 3);
+            int y = (int)h - 1 - mean;
+            if (y < 0) y = 0;
+            unsigned lo = (unsigned)(prev < 0 ? y : (prev < y ? prev : y));
+            unsigned hi = (unsigned)(prev < 0 ? y : (prev > y ? prev : y));
+            for (unsigned yy = lo; yy <= hi; yy++) mask_put(x, yy, 2);
+            prev = y;
+            if (hold > mean && (x / 5) % 2 < 3) {
+                int ph = (int)h - 1 - hold;
+                if (ph >= 0) mask_put(x, (unsigned)ph, 3);
+            }
         }
     }
     lcd_draw_bitmap2(0, layout.spec_y, w, h, mask, spec_palette);
+
+    char line[32];
+    for (int db = -120; db <= 0; db += 20) {
+        if (db < cfg.bottom_db || db > cfg.top_db) continue;
+        int y = (int)h - (db - (int)cfg.bottom_db) * (int)h / range;
+        if (y <= 9 || y >= (int)h - 11) continue;
+        snprintf(line, sizeof(line), "%d", db);
+        ui_text(3, layout.spec_y + (unsigned)y - FONT5X7_H - 1, line, COL_DIM, COL_SPEC_BG, false);
+    }
+
+    unsigned shown = usb_active ? sdr_ui_frequency() : band_mhz(channel);
+    snprintf(line, sizeof(line), "%u", shown - 10);
+    ui_text(4, layout.spec_y + h - FONT5X7_H - 3, line, COL_DIM, COL_SPEC_BG, false);
+    snprintf(line, sizeof(line), "%u", shown + 10);
+    unsigned tw = text_w(line);
+    ui_text(w - 4 - tw, layout.spec_y + h - FONT5X7_H - 3, line, COL_DIM, COL_SPEC_BG, false);
+
+    if (cfg.mode == UI_MODE_LIVE) {
+        unsigned cx = w / 2;
+        for (unsigned y = 0; y < h; y += 5) {
+            unsigned seg = h - y < 3 ? h - y : 3;
+            lcd_fill_rect(cx, layout.spec_y + y, 1, seg, COL_GLOW);
+        }
+        ui_text(4, layout.spec_y + 4, "LIVE 20M", COL_GLOW, COL_SPEC_BG, false);
+    } else {
+        char lab[40];
+        snprintf(lab, sizeof(lab), "ch%u %uM  %d%%", band_number(channel), shown, det_pct);
+        unsigned lw = text_w(lab) + 10;
+        fill_round_rect(3, layout.spec_y + 5, lw, 13, 3, 0x08A3);
+        round_rect_border(3, layout.spec_y + 5, lw, 13, 3, COL_ACCENT);
+        ui_text(8, layout.spec_y + 8, lab, 0xDFBF, 0x08A3, false);
+    }
 }
 
 static void render_waterfall(unsigned w) {
     unsigned rows = layout.wf_h;
+    int range = (int)cfg.top_db - (int)cfg.bottom_db;
+    if (range < 5) range = 5;
     for (unsigned r = 0; r < rows; r++) {
         const uint8_t *src = wf + ((wf_next + r) % rows) * WF_STRIDE;
-        for (unsigned x = 0; x < w; x++) wf_line[x] = wf_palette[src[x]];
+        for (unsigned x = 0; x < w; x++) {
+            int db = (int)(src[x] / 2) - 84;
+            int idx = (db - (int)cfg.bottom_db) * 255 / range;
+            if (idx < 0) idx = 0;
+            if (idx > 255) idx = 255;
+            wf_line[x] = wf_palette[idx];
+        }
         lcd_set_window(0, layout.wf_y + r, w, 1);
         lcd_pixels(wf_line, w);
     }
 }
 
 static void render_strip(unsigned w) {
-    lcd_fill_rect(0, layout.strip_y, w, layout.strip_h, COL_PANEL);
+    unsigned top = layout.strip_y;
+    lcd_fill_rect(0, top, w, layout.strip_h, COL_STRIP);
+    lcd_fill_rect(0, top, w, 1, COL_BG);
     unsigned count = band_count();
-    unsigned cell = w / count;
+    unsigned margin = 4;
+    unsigned gap = count > 20 ? 0 : 1;
+    unsigned cw = (w - margin * 2 - gap * (count - 1)) / count;
+    unsigned y = top + 3;
+    unsigned h = layout.strip_h - 6;
+    unsigned detH = 7, actH = 7, barGap = 2;
+    unsigned actY = y + h - actH;
+    unsigned detY = actY - barGap - detH;
+    unsigned labelY = y + (detY - y - FONT5X7_H) / 2;
     unsigned selected = usb_active ? (unsigned)((sel_x * (int)count) / (int)w)
                                    : (cfg.mode == UI_MODE_SWEEP ? scan_index : channel);
     if (selected >= count) selected = count - 1;
     char label[8];
     for (unsigned i = 0; i < count; i++) {
-        unsigned x = i * cell;
-        uint16_t fill = i == selected ? COL_ACCENT : COL_CELL;
-        lcd_fill_rect(x + 1, layout.strip_y + 3, cell - 2, layout.strip_h - 6, fill);
-        if (cell >= 16) {
+        unsigned x = margin + i * (cw + gap);
+        if (i == selected) {
+            fill_round_rect(x, y, cw, h, 2, COL_TINT_C);
+            round_rect_border(x, y, cw, h, 2, COL_ACCENT);
+        }
+        unsigned track = cw > 2 ? cw - 2 : 1;
+        unsigned det = ch_det[i], act = ch_act[i];
+        lcd_fill_rect(x + 1, detY, track, detH, 0x2966);
+        uint16_t dc = ch_pk[i] > 70 ? COL_RED : ch_pk[i] > 40 ? COL_PEAK : COL_GREEN;
+        if (det > 2) {
+            unsigned bwid = track * det / 100;
+            lcd_fill_rect(x + 1, detY, bwid ? bwid : 1, detH, dc);
+        }
+        lcd_fill_rect(x + 1, actY, track, actH, 0x2105);
+        if (act > 2) {
+            unsigned bwid = track * act / 100;
+            lcd_fill_rect(x + 1, actY, bwid ? bwid : 1, actH, COL_USB);
+        }
+        bool grp = count <= 13 || i % 4 == 0 || i + 1 == count;
+        unsigned dist = selected > i ? selected - i : i - selected;
+        if (grp && i != selected && (count <= 13 || dist > 1)) {
             snprintf(label, sizeof(label), "%u", band_number(i));
-            unsigned tw = (unsigned)strlen(label) * (FONT5X7_W + 1) - 1;
-            ui_text(x + (cell - tw) / 2, layout.strip_y + (layout.strip_h - FONT5X7_H) / 2, label,
-                    i == selected ? COL_BG : COL_DIM, fill, false);
+            unsigned tw = text_w(label);
+            int lx = (int)(x + cw / 2) - (int)(tw / 2);
+            if (lx < 0) lx = 0;
+            ui_text((unsigned)lx, labelY, label, COL_DIM, COL_STRIP, false);
         }
     }
+    {
+        unsigned x = margin + selected * (cw + gap);
+        snprintf(label, sizeof(label), "%u", band_number(selected));
+        unsigned tw = text_w(label);
+        int lx = (int)(x + cw / 2) - (int)(tw / 2);
+        if (lx < 0) lx = 0;
+        ui_text((unsigned)lx, labelY, label, COL_TEXT, COL_TINT_C, false);
+    }
     if (usb_active) {
-        lcd_fill_rect(w / 2 - 18, layout.strip_y + 2, 36, layout.strip_h - 4, COL_PANEL);
-        ui_text(w / 2 - 16, layout.strip_y + (layout.strip_h - FONT5X7_H) / 2, "USB", COL_USB, COL_PANEL,
-                false);
+        lcd_fill_rect(w / 2 - 18, top + 2, 36, layout.strip_h - 4, COL_STRIP);
+        ui_text(w / 2 - 16, top + (layout.strip_h - FONT5X7_H) / 2, "USB", COL_USB, COL_STRIP, false);
     }
 }
 
 static void render_overlays(unsigned w) {
-    if (muted) {
-        lcd_fill_rect(w / 2 - 28, layout.spec_y + layout.spec_h / 2 - 6, 56, 13, COL_MUTE);
-        ui_text(w / 2 - 24, layout.spec_y + layout.spec_h / 2 - 4, "MUTE", COL_TEXT, COL_MUTE, false);
-    }
-    if (!have_data && !usb_active) {
-        unsigned y = layout.spec_y + layout.spec_h / 2 - FONT5X7_H / 2;
-        ui_text(w / 2 - 27, y, "SCANNING", COL_DIM, COL_BG, false);
-    }
+    (void)w;
     if (rot_prev && !usb_active) {
         int64_t elapsed = esp_timer_get_time() - rot_start;
         unsigned left = elapsed >= 5000000 ? 0 : (unsigned)((5000000 - elapsed + 999999) / 1000000);
         char line[16];
         snprintf(line, sizeof(line), "RESET %u", left);
-        lcd_fill_rect(6, layout.spec_y + 4, 88, 15, COL_PANEL);
-        ui_text(9, layout.spec_y + 7, line, COL_PEAK, COL_PANEL, false);
+        fill_round_rect(6, layout.spec_y + 4, 88, 15, 3, COL_PANEL);
+        round_rect_border(6, layout.spec_y + 4, 88, 15, 3, COL_PEAK);
+        ui_text(9, layout.spec_y + 8, line, COL_PEAK, COL_PANEL, false);
     }
 }
 
@@ -263,6 +424,23 @@ static void analyse(void) {
     det_pct = (int)(det * 100 / FFT_BINS);
 }
 
+static void stats_store(void) {
+    unsigned i = channel;
+    if (i >= 36) return;
+    int lv = (pk_db - (cfg.bottom_db + 4)) * 100 / 50;
+    int ac = act_db * 100 / 60;
+    int de = det_pct;
+    if (lv < 0) lv = 0;
+    if (lv > 100) lv = 100;
+    if (ac < 0) ac = 0;
+    if (ac > 100) ac = 100;
+    if (de < 0) de = 0;
+    if (de > 100) de = 100;
+    ch_pk[i] = (uint8_t)lv;
+    ch_act[i] = (uint8_t)ac;
+    ch_det[i] = (uint8_t)de;
+}
+
 static void waterfall_push(void) {
     unsigned w = lcd_width();
     unsigned rows = layout.wf_h;
@@ -288,6 +466,7 @@ static void acquire(void) {
             peak[j]--;
     }
     analyse();
+    stats_store();
     waterfall_push();
     (void)elapsed;
 }
@@ -319,6 +498,9 @@ static void toggle_band(void) {
     cfg.band = cfg.band == UI_BAND_5G ? UI_BAND_24G : UI_BAND_5G;
     channel = scan_index = 0;
     memset(peak, 0, sizeof(peak));
+    memset(ch_pk, 0, sizeof(ch_pk));
+    memset(ch_act, 0, sizeof(ch_act));
+    memset(ch_det, 0, sizeof(ch_det));
     have_data = false;
     ui_settings_save(&cfg);
     buzzer_play(UI_BUZZ_BAND);
@@ -356,6 +538,9 @@ static void reset_defaults(void) {
     layout_build();
     wf_next = 0;
     memset(peak, 0, sizeof(peak));
+    memset(ch_pk, 0, sizeof(ch_pk));
+    memset(ch_act, 0, sizeof(ch_act));
+    memset(ch_det, 0, sizeof(ch_det));
     memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
     have_data = false;
     ui_settings_save(&cfg);
@@ -460,21 +645,22 @@ static void ui_task(void *arg) {
 }
 
 static void palette_init(void) {
+    /* Cool-to-hot gradient from the approved design: navy, teal, green, amber, red. */
+    static const uint8_t stops[8][3] = {
+        {16, 42, 67},   {14, 76, 107},  {10, 124, 138}, {18, 179, 168},
+        {142, 212, 60}, {255, 210, 63}, {255, 140, 66}, {232, 70, 58},
+    };
     for (unsigned i = 0; i < 256; i++) {
-        uint8_t r = 0, g = 0, b = 0;
-        if (i < 64) {
-            b = (uint8_t)(i * 4);
-        } else if (i < 128) {
-            b = 255;
-            g = (uint8_t)((i - 64) * 4);
-        } else if (i < 192) {
-            g = 255;
-            b = (uint8_t)(255 - (i - 128) * 4);
-            r = (uint8_t)((i - 128) * 4);
-        } else {
-            r = 255;
-            g = (uint8_t)(255 - (i - 192) * 4);
+        unsigned pos = i * 7 * 256 / 255;
+        unsigned seg = pos >> 8;
+        unsigned f = pos & 0xff;
+        if (seg > 6) {
+            seg = 6;
+            f = 255;
         }
+        uint8_t r = (uint8_t)((stops[seg][0] * (256 - f) + stops[seg + 1][0] * f) >> 8);
+        uint8_t g = (uint8_t)((stops[seg][1] * (256 - f) + stops[seg + 1][1] * f) >> 8);
+        uint8_t b = (uint8_t)((stops[seg][2] * (256 - f) + stops[seg + 1][2] * f) >> 8);
         wf_palette[i] = lcd_rgb565(r, g, b);
     }
 }
