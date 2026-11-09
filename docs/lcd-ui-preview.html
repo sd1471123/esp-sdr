@@ -307,22 +307,30 @@ function mulberry32(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+/* Synthetic band, modelled like the demo source of the phone app: a few 20 MHz
+ * wide access points over a noise floor, so the preview shows the same smooth
+ * trace instead of per-bin noise spikes. */
+const AP_LIST = [
+  { f: 2412, p: -57 }, { f: 2437, p: -42 }, { f: 2462, p: -67 },
+  { f: 5180, p: -48 }, { f: 5220, p: -63 }, { f: 5500, p: -55 }, { f: 5745, p: -61 },
+];
+function psdDb(f) {
+  let p = -82;
+  for (const a of AP_LIST) {
+    const d = Math.abs(f - a.f) / 10;
+    if (d < 1) {
+      const shape = 0.04 + 0.96 * Math.pow(Math.cos(d * Math.PI / 2), 2);
+      p = Math.max(p, a.p + 10 * Math.log10(shape));
+    }
+  }
+  return p;
+}
 function makeCodes(mhz, tick, out) {
   const rnd = mulberry32(hash32(mhz * 7919 + tick * 131));
   for (let i = 0; i < FFT_BINS; i++) {
-    let v = 5 + 3 * Math.sin(i * 0.21 + tick * 0.05) + 2 * Math.sin(i * 0.053 + 1.1);
-    v += rnd() * 5;
-    out[i] = Math.max(0, Math.min(255, v | 0));
-  }
-  const h = hash32(mhz);
-  const centers = [h % 256, (h >>> 7) % 256, (h >>> 15) % 256, (h >>> 21) % 256];
-  const amps = [58, 96, 40, 26], widths = [2.2, 3.4, 1.6, 4.0];
-  for (let k = 0; k < centers.length; k++) {
-    const c = centers[k], a = amps[k], w = widths[k];
-    for (let d = -10; d <= 10; d++) {
-      const b = (c + d + 256) % 256;
-      out[b] = Math.max(0, Math.min(255, out[b] + a * Math.exp(-(d * d) / (w * w))));
-    }
+    const f = mhz - 10 + (i + 0.5) * 20 / FFT_BINS;
+    const db = psdDb(f) + (rnd() - 0.5) * 1.4;
+    out[i] = Math.max(0, Math.min(255, Math.round((db + 84) * 2)));
   }
 }
 
@@ -347,15 +355,44 @@ function waterfallPush() {
   wfNext = (wfNext + 1) % L.wf_h;
 }
 
+/* Bars come from the finished sweep, like the phone app: while a pass is running
+ * the strip keeps the previous result instead of sampling the window just captured. */
+function rebuildChannelStats() {
+  const count = bandCount();
+  const sample = [];
+  for (let k = 0; k < 64; k++) sample.push(bandCodes[Math.round(k * (W - 1) / 63)]);
+  sample.sort((a, b) => a - b);
+  const noise = sample[16];
+  for (let c = 0; c < count && c < 36; c++) {
+    const lo = c * W / count | 0, hi = (c + 1) * W / count | 0;
+    let pk = 0, sum = 0, det = 0, n = 0;
+    for (let x = lo; x < Math.max(lo + 1, hi) && x < W; x++) {
+      if (bandPeak[x] > pk) pk = bandPeak[x];
+      sum += bandCodes[x];
+      if (bandCodes[x] > noise + 16) det++;
+      n++;
+    }
+    if (!n) continue;
+    const pkDb = (pk / 2 | 0) - 84;
+    const actDb = ((sum / n | 0) - noise) / 2 | 0;
+    chPk[c] = Math.max(0, Math.min(100, Math.trunc((pkDb - (cfg.bottom_db + 4)) * 100 / 50)));
+    chAct[c] = Math.max(0, Math.min(100, Math.trunc(actDb * 100 / 60)));
+    chDet[c] = Math.trunc(det * 100 / n);
+    chPkDb[c] = pkDb; chActDb[c] = actDb; chSeen[c] = 1;
+  }
+}
+
 function acquire() {
   const count = bandCount();
   const sweep = cfg.mode === 0;
   if (sweep) {
     scan_index = (scan_index + 1) % count;
     if (scan_index === 0) {
-      /* new pass: restart the average, the peak hold stays (as in the phone app) */
+      /* one full pass done: the phone app drops PEAK_DECAY_DB (2 dB) from the hold */
+      for (let x = 0; x < W; x++) if (bandPeak[x]) bandPeak[x]--;
       specSum.fill(0);
       specCnt.fill(0);
+      rebuildChannelStats();
     }
   }
   const tuned = sweep ? scan_index : channel;
@@ -368,8 +405,11 @@ function acquire() {
   if (hi > W) hi = W;
   const span = hi - lo;
   for (let x = lo; x < hi; x++) {
-    const bin = Math.min(FFT_BINS - 1, ((x - lo) * FFT_BINS / span) | 0);
-    const v = codes[bin];
+    const b0 = Math.min(FFT_BINS - 1, ((x - lo) * FFT_BINS / span) | 0);
+    const b1 = Math.max(b0 + 1, Math.min(FFT_BINS, (((x + 1 - lo) * FFT_BINS / span) | 0)));
+    let p = 0;
+    for (let b = b0; b < b1; b++) p += Math.pow(10, (codes[b] * 0.5 - 84) * 0.1);
+    const v = Math.max(0, Math.min(255, Math.round((10 * Math.log10(p / (b1 - b0)) + 84) * 2)));
     if (sweep) {
       const db = v * 0.5 - 84;
       specSum[x] += Math.pow(10, db * 0.1);
@@ -382,12 +422,15 @@ function acquire() {
     if (v >= bandPeak[x]) bandPeak[x] = v;
   }
   analyse();
-  const lv = Math.max(0, Math.min(100, Math.trunc((pk_db - (cfg.bottom_db + 4)) * 100 / 50)));
-  const ac = Math.max(0, Math.min(100, Math.trunc(act_db * 100 / 60)));
-  chPk[tuned] = lv;
-  chAct[tuned] = ac;
-  chDet[tuned] = Math.max(0, Math.min(100, det_pct));
-  chPkDb[tuned] = pk_db; chActDb[tuned] = act_db; chSeen[tuned] = 1;
+  if (!sweep) {
+    const lv = Math.max(0, Math.min(100, Math.trunc((pk_db - (cfg.bottom_db + 4)) * 100 / 50)));
+    const ac = Math.max(0, Math.min(100, Math.trunc(act_db * 100 / 60)));
+    chPk[tuned] = lv;
+    chAct[tuned] = ac;
+    chDet[tuned] = Math.max(0, Math.min(100, det_pct));
+    chPkDb[tuned] = pk_db; chActDb[tuned] = act_db; chSeen[tuned] = 1;
+    rebuildChannelStats();
+  }
   waterfallPush();
 }
 
@@ -685,7 +728,8 @@ function adjustLimit(top, dir) {
 
 function toggleBand() {
   cfg.band = cfg.band === 1 ? 0 : 1;
-  channel = scan_index = middleIndex();
+  channel = middleIndex();
+  scan_index = 0;
   bandCodes.fill(0); bandPeak.fill(0);
   wf.fill(0);
   wfNext = 0;
@@ -699,7 +743,7 @@ function toggleBand() {
 function toggleMode() {
   cfg.mode = cfg.mode === 0 ? 1 : 0;
   if (cfg.mode === 0) channel = middleIndex();
-  scan_index = channel;
+  scan_index = cfg.mode === 0 ? 0 : channel;
   bandCodes.fill(0); bandPeak.fill(0);
   wf.fill(0);
   wfNext = 0;
@@ -724,7 +768,8 @@ function resetDefaults() {
   muted = false;
   try { localStorage.removeItem(STORE_KEY); } catch (e) {}
   chSeen.fill(0);
-  channel = scan_index = middleIndex();
+  channel = middleIndex();
+  scan_index = 0;
   lastStep = 0;
   allocBuffer();
   wfNext = 0;
@@ -878,7 +923,8 @@ loadCfg();
 allocBuffer();
 if (cfg.landscape) { /* already */ }
 muted = !!cfg.mute;
-channel = scan_index = middleIndex();
+channel = middleIndex();
+scan_index = 0;
 wf.fill(0); bandCodes.fill(0); bandPeak.fill(0);
 haveData = false;
 render();

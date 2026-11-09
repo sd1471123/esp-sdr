@@ -92,6 +92,24 @@ static uint8_t ch_pk[36], ch_act[36], ch_det[36];
 static int8_t ch_pk_db[36], ch_act_db[36];
 static uint64_t ch_seen; /* bit per channel with at least one capture */
 
+/* Power average of the FFT bins covered by one pixel column. Without this the
+ * 256-bin capture was sampled at a single bin per column, which left the stitched
+ * trace far sparser and noisier than the phone app's. */
+static uint8_t column_code(unsigned x, unsigned lo, unsigned hi, unsigned span) {
+    unsigned b0 = (x - lo) * FFT_BINS / span;
+    unsigned b1 = (x + 1 - lo) * FFT_BINS / span;
+    if (b0 >= FFT_BINS) b0 = FFT_BINS - 1;
+    if (b1 > FFT_BINS) b1 = FFT_BINS;
+    if (b1 <= b0) b1 = b0 + 1;
+    float p = 0.0f;
+    for (unsigned b = b0; b < b1; b++) p += powf(10.0f, ((float)codes[b] * 0.5f - 84.0f) * 0.1f);
+    float db = 10.0f * log10f(p / (float)(b1 - b0));
+    int v = (int)((db + 84.0f) * 2.0f + 0.5f);
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    return (uint8_t)v;
+}
+
 static unsigned band_count(void) { return cfg.band == UI_BAND_5G ? 36 : 13; }
 static unsigned band_number(unsigned idx) { return cfg.band == UI_BAND_5G ? 36 + idx * 4 : idx + 1; }
 static unsigned band_mhz(unsigned idx) { return cfg.band == UI_BAND_5G ? 5180 + idx * 20 : 2412 + idx * 5; }
@@ -437,6 +455,48 @@ static void render(void) {
     render_overlays(w);
 }
 
+/* Recompute the per-channel bars from the finished sweep: the app only publishes
+ * the bars/rates when a pass completes, so the strip shows sweep results rather
+ * than a sample of whichever window was just captured. */
+static void rebuild_channel_stats(void) {
+    unsigned w = lcd_width(), count = band_count();
+    if (!count) return;
+    unsigned sample[64];
+    for (unsigned k = 0; k < 64; k++) sample[k] = band_codes[(k * (w - 1)) / 63];
+    for (unsigned i = 1; i < 64; i++) {
+        unsigned v = sample[i], j = i;
+        while (j && sample[j - 1] > v) {
+            sample[j] = sample[j - 1];
+            j--;
+        }
+        sample[j] = v;
+    }
+    unsigned noise = sample[16];
+    for (unsigned c = 0; c < count && c < 36; c++) {
+        unsigned lo = c * w / count, hi = (c + 1) * w / count;
+        if (hi <= lo) hi = lo + 1;
+        unsigned pk = 0, sum = 0, det = 0, n = 0;
+        for (unsigned x = lo; x < hi && x < w; x++) {
+            unsigned v = band_peak[x];
+            if (v > pk) pk = v;
+            sum += band_codes[x];
+            if (band_codes[x] > noise + 16) det++;
+            n++;
+        }
+        if (!n) continue;
+        int pk_db_c = (int)(pk / 2) - 84;
+        int act_db_c = ((int)(sum / n) - (int)noise) / 2;
+        int lv = (pk_db_c - (int)(cfg.bottom_db + 4)) * 100 / 50;
+        ch_pk[c] = (uint8_t)(lv < 0 ? 0 : lv > 100 ? 100 : lv);
+        int ac = act_db_c * 100 / 60;
+        ch_act[c] = (uint8_t)(ac < 0 ? 0 : ac > 100 ? 100 : ac);
+        ch_det[c] = (uint8_t)(det * 100 / n);
+        ch_pk_db[c] = (int8_t)pk_db_c;
+        ch_act_db[c] = (int8_t)act_db_c;
+        ch_seen |= (uint64_t)1 << c;
+    }
+}
+
 static void analyse(void) {
     uint8_t sorted[FFT_BINS];
     memcpy(sorted, codes, sizeof(sorted));
@@ -496,9 +556,12 @@ static void acquire(void) {
     if (sweep) {
         scan_index = (uint8_t)((scan_index + 1) % count);
         if (scan_index == 0) {
-            /* new pass: restart the average, the peak hold stays (as in the phone app) */
+            /* one full pass done: the phone app drops PEAK_DECAY_DB (2 dB) from the hold */
+            for (unsigned x = 0; x < w; x++)
+                if (band_peak[x]) band_peak[x]--;
             if (spec_sum) memset(spec_sum, 0, 320 * sizeof(float));
             if (spec_cnt) memset(spec_cnt, 0, 320 * sizeof(uint16_t));
+            rebuild_channel_stats();
         }
     }
     unsigned tuned = sweep ? scan_index : channel;
@@ -513,24 +576,25 @@ static void acquire(void) {
     if (hi > w) hi = w;
     unsigned span = hi - lo;
     for (unsigned x = lo; x < hi; x++) {
-        unsigned bin = (x - lo) * FFT_BINS / span;
-        if (bin >= FFT_BINS) bin = FFT_BINS - 1;
+        uint8_t v = column_code(x, lo, hi, span);
         if (sweep && spec_sum && spec_cnt) {
-            float db = (float)codes[bin] * 0.5f - 84.0f;
-            spec_sum[x] += powf(10.0f, db * 0.1f);
+            spec_sum[x] += powf(10.0f, ((float)v * 0.5f - 84.0f) * 0.1f);
             spec_cnt[x]++;
             float avg_db = 10.0f * log10f(spec_sum[x] / (float)spec_cnt[x]);
-            int v = (int)((avg_db + 84.0f) * 2.0f + 0.5f);
-            if (v < 0) v = 0;
-            if (v > 255) v = 255;
-            band_codes[x] = (uint8_t)v;
+            int a = (int)((avg_db + 84.0f) * 2.0f + 0.5f);
+            if (a < 0) a = 0;
+            if (a > 255) a = 255;
+            band_codes[x] = (uint8_t)a;
         } else {
-            band_codes[x] = codes[bin];
+            band_codes[x] = v;
         }
-        if (codes[bin] >= band_peak[x]) band_peak[x] = codes[bin];
+        if (v >= band_peak[x]) band_peak[x] = v;
     }
     analyse();
-    stats_store(tuned);
+    if (sweep)
+        stats_store(tuned); /* only for the per-channel dB history of the cursor */
+    else
+        rebuild_channel_stats();
     waterfall_push();
     (void)elapsed;
 }
@@ -561,7 +625,8 @@ static void adjust_limit(bool top, int direction) {
 
 static void toggle_band(void) {
     cfg.band = cfg.band == UI_BAND_5G ? UI_BAND_24G : UI_BAND_5G;
-    channel = scan_index = (uint8_t)middle_index();
+    channel = (uint8_t)middle_index();
+    scan_index = 0; /* start the pass at the first channel so every wrap is a full pass */
     memset(band_codes, 0, sizeof(band_codes));
     memset(band_peak, 0, sizeof(band_peak));
     memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
@@ -581,7 +646,7 @@ static void toggle_band(void) {
 static void toggle_mode(void) {
     cfg.mode = cfg.mode == UI_MODE_SWEEP ? UI_MODE_LIVE : UI_MODE_SWEEP;
     if (cfg.mode == UI_MODE_SWEEP) channel = (uint8_t)middle_index();
-    scan_index = channel;
+    scan_index = cfg.mode == UI_MODE_SWEEP ? 0 : channel;
     memset(band_codes, 0, sizeof(band_codes));
     memset(band_peak, 0, sizeof(band_peak));
     memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
@@ -612,7 +677,8 @@ static void reset_defaults(void) {
     cfg = fresh;
     muted = false;
     buzzer_enable(true);
-    channel = scan_index = (uint8_t)middle_index();
+    channel = (uint8_t)middle_index();
+    scan_index = 0;
     last_step = 0;
     lcd_set_rotation(cfg.landscape != 0);
     layout_build();
@@ -770,6 +836,6 @@ void local_ui_start(void) {
 
     muted = cfg.mute != 0;
     channel = (uint8_t)middle_index();
-    scan_index = channel;
+    scan_index = 0;
     xTaskCreate(ui_task, "local_ui", 6144, NULL, 3, NULL);
 }
