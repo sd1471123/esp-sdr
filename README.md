@@ -56,19 +56,17 @@ release.
 ![ESP32-C5 front panel: 5 GHz sweep with cyan trace, amber peak hold, dB grid, waterfall and per-channel DET/ACT strip](docs/lcd-ui-preview.png)
 
 The panel follows the approved dark-panel design: band label and a `SWEEP` /
-`LIVE` pill, `PK`/`ACT`/`DET` readout and the current channel on top; a cyan
-spectrum trace with an amber dashed peak-hold line and a 20 dB grid; a
-cool-to-hot waterfall; and a channel strip with per-channel `DET`/`ACT` bars
-filled in as the sweep visits each channel. Like the phone app, every capture
-refreshes only its own 20 MHz slice of a stitched band, so the waterfall keeps a
-fixed frequency axis while the sweep walks across it, and the peak hold decays
-2 dB per completed sweep. An interactive simulation of the same screen (same fonts,
-colours, layout, key handling and timings) is in
-[`docs/lcd-ui-preview.html`](docs/lcd-ui-preview.html) — download it and open it
-in a browser. While a USB/UART host is streaming, the panel stops retuning,
-mirrors the host's frequency and keeps its keys working; setting changes (band,
-mode, dB range, orientation, buzzer, mute) are stored in NVS, and a 5 s `ROT`
-hold restores the defaults and wipes that store.
+`LIVE` pill, `PK`/`ACT`/`DET` readout and the current channel on top; an amber
+filled spectrum with a cyan average line and a peak-hold line; and a cool-to-hot
+waterfall. `SWEEP` mirrors the phone app: the axis spans the whole band
+(5150-5895 / 2400-2500), the LO steps 20 MHz from band start - 10 to band end + 10,
+only the +/-10..20 MHz ring of each 80 MS/s capture is kept (the DC region is
+skipped and covered by a neighbouring step), and every column is the power
+average of the bins that fell on it during the pass. The peak hold drops 2 dB per
+completed pass and the `DET`/`ACT` bars are republished at pass end using the app's
+20th-percentile floor, +/-8 MHz window and 12 dB detection threshold. The dB axis
+auto-scales to a 70 dB window anchored on the noise floor or the strongest peak;
+the `BAND`/`MODE` range keys switch it to a manual window.
 
 | Key | Short press | Hold |
 | --- | --- | --- |

@@ -294,6 +294,8 @@ function columnOf(mhz) {
   const c = ((mhz - bandLo()) * (W - 1) / span) | 0;
   return (c < 0 || c >= W) ? -1 : c;
 }
+const bandSum = new Float64Array(320);
+const bandCnt = new Uint16Array(320);
 function bandLabel() { return cfg.band === 1 ? "5G" : "2.4G"; }
 /* ch104 in 5G, ch7 in 2.4G: where the cursor and the sweep start (design spec). */
 function middleIndex() { return (bandCount() - 1) / 2 | 0; }
@@ -453,18 +455,26 @@ function acquire() {
     /* 只取 80 MS/s 采集的 ±10..20 MHz 环带，跳过 LO 附近的直流区 */
     const df = 80 / FFT_BINS;
     for (let j = 0; j < FFT_BINS; j++) {
-      const rel = (j - FFT_BINS / 2 + 0) * df;
-      const a = Math.abs(rel);
-      if (a < 10 || a > 20) continue;
-      const col = columnOf(Math.round(mhz + rel));
+      const rel = (j - FFT_BINS / 2) * df;
+      if (Math.abs(rel) < 10 || Math.abs(rel) > 20) continue;
+      const col = columnOf(mhz + rel);
       if (col < 0) continue;
       colSeenSet(col);
       if (codes[j] >= bandPeak[col]) bandPeak[col] = codes[j];
-      bandCodes[col] = codes[j];
+      bandSum[col] += Math.pow(10, (codes[j] * 0.5 - 84) * 0.1);
+      bandCnt[col]++;
+    }
+    for (let x = 0; x < W; x++) {
+      if (!bandCnt[x]) continue;
+      const avg = 10 * Math.log10(bandSum[x] / bandCnt[x]);
+      bandCodes[x] = Math.max(0, Math.min(255, Math.round((avg + 84) * 2)));
     }
     if (++sweepIndex >= sweepSteps()) {
       sweepIndex = 0;
-      for (let x = 0; x < W; x++) bandPeak[x] = bandPeak[x] > 4 ? bandPeak[x] - 4 : 0;
+      for (let x = 0; x < W; x++) {
+        bandPeak[x] = bandPeak[x] > 4 ? bandPeak[x] - 4 : 0;
+        bandSum[x] = 0; bandCnt[x] = 0;
+      }
       publishBars();
     }
   } else {
@@ -779,7 +789,7 @@ function adjustLimit(top, dir) {
 function toggleBand() {
   cfg.band = cfg.band === 1 ? 0 : 1;
   channel = middleIndex();
-    bandCodes.fill(0); bandPeak.fill(0); colSeen.fill(0);
+    bandCodes.fill(0); bandPeak.fill(0); colSeen.fill(0); bandSum.fill(0); bandCnt.fill(0);
   chHits.fill(0); sweeps = 0; sweepIndex = 0; winPeak.fill(0);
   viewTop = -30; viewBot = -100; manualRange = false;
   wf.fill(0);

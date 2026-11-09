@@ -115,12 +115,13 @@ static unsigned sweep_steps(void) { return (band_hi() + 10 - (band_lo() - 10)) /
 static unsigned sweep_lo(unsigned i) { return band_lo() - 10 + i * 20; }
 
 /* Pixel column that shows a frequency on the band axis, or -1 outside it. */
-static int column_of(unsigned mhz, unsigned w) {
-    int span = (int)band_hi() - (int)band_lo();
+static int column_of_f(float mhz, unsigned w) {
+    float span = (float)band_hi() - (float)band_lo();
     if (span <= 0 || w < 2) return -1;
-    int c = (int)(((int)mhz - (int)band_lo()) * (int)(w - 1) / span);
+    int c = (int)((mhz - (float)band_lo()) * (float)(w - 1) / span);
     return (c < 0 || c >= (int)w) ? -1 : c;
 }
+static int column_of(unsigned mhz, unsigned w) { return column_of_f((float)mhz, w); }
 
 static bool col_seen_bit(unsigned x) { return (col_seen[x >> 3] >> (x & 7)) & 1u; }
 static void col_seen_set(unsigned x) { col_seen[x >> 3] |= (uint8_t)(1u << (x & 7)); }
@@ -654,7 +655,7 @@ static void acquire(void) {
             float rel = ((float)j - (float)FFT_BINS / 2.0f) * df;
             float a = rel < 0 ? -rel : rel;
             if (a < 10.0f || a > 20.0f) continue;
-            int col = column_of((unsigned)((float)mhz + rel + 0.5f), w);
+            int col = column_of_f((float)mhz + rel, w);
             if (col < 0) continue;
             col_seen_set((unsigned)col);
             if (spec_sum) spec_sum[col] += powf(10.0f, ((float)codes[j] * 0.5f - 84.0f) * 0.1f);
