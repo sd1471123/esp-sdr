@@ -16,6 +16,7 @@ typedef struct {
     uint16_t repeat;      /* direction keys, held down */
     uint16_t long_press;  /* rotation key only */
     bool chord_mute;      /* LEFT+RIGHT within 350 ms */
+    uint8_t dir_mod;      /* modifier captured at the direction press: 1 top, 2 bottom */
 } ui_button_event_t;
 
 void buttons_init(void);

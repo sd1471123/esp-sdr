@@ -23,6 +23,7 @@ typedef struct {
     bool suppressed;    /* consumed by the mute chord */
     bool skip_short;    /* used as a modifier for a direction key */
     bool repeated;      /* auto-repeat already emitted for this press */
+    uint8_t mod;        /* combo modifier captured at press: 1 top, 2 bottom */
 } button_state_t;
 
 static button_state_t buttons[UI_BTN_COUNT] = {
@@ -56,10 +57,17 @@ static void press_edge(unsigned j, int64_t now, ui_button_event_t *event) {
     buttons[j].long_sent = false;
     buttons[j].suppressed = false;
     buttons[j].repeated = false;
+    buttons[j].mod = 0;
     if (j == UI_BTN_LEFT || j == UI_BTN_RIGHT) {
-        /* BAND/MODE become combo modifiers while a direction key is held. */
-        if (buttons[UI_BTN_BAND].stable) buttons[UI_BTN_BAND].skip_short = true;
-        if (buttons[UI_BTN_MODE].stable) buttons[UI_BTN_MODE].skip_short = true;
+        /* The combo only works in this order: BAND/MODE first, then a direction key.
+         * A modifier pressed after the direction key stays a normal short press. */
+        if (buttons[UI_BTN_BAND].stable) {
+            buttons[j].mod = 1;
+            buttons[UI_BTN_BAND].skip_short = true;
+        } else if (buttons[UI_BTN_MODE].stable) {
+            buttons[j].mod = 2;
+            buttons[UI_BTN_MODE].skip_short = true;
+        }
         unsigned other = j == UI_BTN_LEFT ? UI_BTN_RIGHT : UI_BTN_LEFT;
         if (buttons[other].stable && !buttons[other].suppressed &&
             now - buttons[other].pressed_us <= CHORD_WINDOW_US) {
@@ -71,8 +79,10 @@ static void press_edge(unsigned j, int64_t now, ui_button_event_t *event) {
 }
 
 static void release_edge(unsigned j, ui_button_event_t *event) {
-    if (!buttons[j].suppressed && !buttons[j].long_sent && !buttons[j].skip_short && !buttons[j].repeated)
+    if (!buttons[j].suppressed && !buttons[j].long_sent && !buttons[j].skip_short && !buttons[j].repeated) {
         event->short_press |= (uint16_t)(1u << j);
+        if (j == UI_BTN_LEFT || j == UI_BTN_RIGHT) event->dir_mod = buttons[j].mod;
+    }
     buttons[j].suppressed = false;
     buttons[j].skip_short = false;
     buttons[j].repeated = false;
@@ -105,6 +115,7 @@ void buttons_poll(ui_button_event_t *event) {
             b->last_repeat_us = now;
             b->repeated = true;
             event->repeat |= (uint16_t)(1u << j);
+            event->dir_mod = b->mod;
         }
     }
 }
