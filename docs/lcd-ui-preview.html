@@ -154,7 +154,11 @@ let lastStep = 0;
 let acqTick = 0;
 
 const codes = new Uint8Array(FFT_BINS);
-const peak = new Uint8Array(FFT_BINS);
+/* Stitched band image, one entry per pixel column (same idea as the phone app): each
+   acquisition refreshes only its own channel's slice, so the waterfall keeps a fixed
+   frequency axis while the sweep walks across it. */
+const bandCodes = new Uint8Array(320);
+const bandPeak = new Uint8Array(320);
 const chPk = new Uint8Array(36), chAct = new Uint8Array(36), chDet = new Uint8Array(36);
 let haveData = false;
 let pk_db = 0, act_db = 0, det_pct = 0;
@@ -277,8 +281,6 @@ function levelOf(code, h) {
   let lv = ((db - cfg.bottom_db) * h / range) | 0;
   return Math.max(0, Math.min(h, lv));
 }
-function displayBin(x, w) { return ((x * FFT_BINS / w | 0) + FFT_BINS / 2) % FFT_BINS; }
-
 /* ---- 模拟 RF：按信道频率生成稳定的信号 + 每次采集的抖动 ---- */
 function hash32(n) {
   n = (n | 0) ^ 0x9e3779b9;
@@ -331,19 +333,36 @@ function analyse() {
 
 function waterfallPush() {
   const row = wfNext * WF_STRIDE;
-  for (let x = 0; x < W; x++) wf[row + x] = codes[displayBin(x, W)];
+  for (let x = 0; x < W; x++) wf[row + x] = bandCodes[x];
   wfNext = (wfNext + 1) % L.wf_h;
 }
 
 function acquire() {
   const count = bandCount();
-  if (cfg.mode === 0) { scan_index = (scan_index + 1) % count; channel = scan_index; }
+  const sweep = cfg.mode === 0;
+  if (sweep) {
+    scan_index = (scan_index + 1) % count;
+    channel = scan_index;
+    if (scan_index === 0) {
+      /* one full pass done: 2 dB of peak-hold decay, like the phone app */
+      for (let x = 0; x < W; x++) if (bandPeak[x]) bandPeak[x]--;
+    }
+  } else {
+    for (let x = 0; x < W; x++) if (bandPeak[x]) bandPeak[x]--;
+  }
   const mhz = bandMhz(channel);
   makeCodes(mhz, acqTick++, codes);
   haveData = true;
-  for (let j = 0; j < FFT_BINS; j++) {
-    if (codes[j] >= peak[j]) peak[j] = codes[j];
-    else if (peak[j]) peak[j]--;
+  const lo = sweep ? (channel * W / count | 0) : 0;
+  let hi = sweep ? ((channel + 1) * W / count | 0) : W;
+  if (hi <= lo) hi = lo + 1;
+  if (hi > W) hi = W;
+  const span = hi - lo;
+  for (let x = lo; x < hi; x++) {
+    const bin = Math.min(FFT_BINS - 1, ((x - lo) * FFT_BINS / span) | 0);
+    const v = codes[bin];
+    bandCodes[x] = v;
+    if (v >= bandPeak[x]) bandPeak[x] = v;
   }
   analyse();
   const lv = Math.max(0, Math.min(100, Math.trunc((pk_db - (cfg.bottom_db + 4)) * 100 / 50)));
@@ -408,9 +427,8 @@ function renderSpectrum() {
   if (haveData) {
     let prev = -1;
     for (let x = 0; x < w; x++) {
-      const b = displayBin(x, w);
-      const mean = levelOf(codes[b], h);
-      let hold = levelOf(peak[b], h);
+      const mean = levelOf(bandCodes[x], h);
+      let hold = levelOf(bandPeak[x], h);
       if (hold < mean) hold = mean;
       let y = h - 1 - mean;
       if (y < 0) y = 0;
@@ -431,8 +449,10 @@ function renderSpectrum() {
     text(3, L.spec_y + y - 8, String(db), C.dim, C.specBg, false);
   }
   const shown = usbActive ? hostFreq : bandMhz(channel);
-  text(4, L.spec_y + h - 10, String(shown - 10), C.dim, C.specBg, false);
-  const hiTxt = String(shown + 10);
+  let loMhz = shown - 10, hiMhz = shown + 10;
+  if (!usbActive && cfg.mode === 0) { loMhz = bandMhz(0) - 10; hiMhz = bandMhz(bandCount() - 1) + 10; }
+  text(4, L.spec_y + h - 10, String(loMhz), C.dim, C.specBg, false);
+  const hiTxt = String(hiMhz);
   text(w - 4 - textW(hiTxt), L.spec_y + h - 10, hiTxt, C.dim, C.specBg, false);
   if (cfg.mode === 1) {
     for (let y = 0; y < h; y += 5) fillRect(w / 2 | 0, L.spec_y + y, 1, Math.min(3, h - y), C.glow);
@@ -647,7 +667,9 @@ function adjustLimit(top, dir) {
 function toggleBand() {
   cfg.band = cfg.band === 1 ? 0 : 1;
   channel = scan_index = 0;
-  peak.fill(0);
+  bandCodes.fill(0); bandPeak.fill(0);
+  wf.fill(0);
+  wfNext = 0;
   chPk.fill(0); chAct.fill(0); chDet.fill(0);
   haveData = false;
   saveCfg();
@@ -665,6 +687,9 @@ function toggleRotation() {
   cfg.landscape = cfg.landscape ? 0 : 1;
   allocBuffer();
   wfNext = 0;
+  bandCodes.fill(0); bandPeak.fill(0);
+  wf.fill(0);
+  haveData = false;
   saveCfg();
   buzz('mode');
 }
@@ -677,7 +702,7 @@ function resetDefaults() {
   lastStep = 0;
   allocBuffer();
   wfNext = 0;
-  peak.fill(0);
+  bandCodes.fill(0); bandPeak.fill(0);
   chPk.fill(0); chAct.fill(0); chDet.fill(0);
   wf.fill(0);
   haveData = false;
@@ -822,7 +847,7 @@ loadCfg();
 allocBuffer();
 if (cfg.landscape) { /* already */ }
 channel = 0; scan_index = 0;
-wf.fill(0); peak.fill(0);
+wf.fill(0); bandCodes.fill(0); bandPeak.fill(0);
 haveData = false;
 render();
 requestAnimationFrame(frame);

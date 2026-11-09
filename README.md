@@ -50,7 +50,7 @@ have been too much work.
 The `lcd` branch adds an optional front panel to the C5 build: a 320×240
 ST7789 SPI display, five keys and a buzzer, driven by the firmware itself — no
 host required. A prebuilt image is attached to the
-[`c5-lcd-2`](https://github.com/sd1471123/esp-sdr/releases/tag/c5-lcd-2)
+[`c5-lcd-3`](https://github.com/sd1471123/esp-sdr/releases/tag/c5-lcd-3)
 release.
 
 ![ESP32-C5 front panel: 5 GHz sweep with cyan trace, amber peak hold, dB grid, waterfall and per-channel DET/ACT strip](docs/lcd-ui-preview.png)
@@ -59,7 +59,10 @@ The panel follows the approved dark-panel design: band label and a `SWEEP` /
 `LIVE` pill, `PK`/`ACT`/`DET` readout and the current channel on top; a cyan
 spectrum trace with an amber dashed peak-hold line and a 20 dB grid; a
 cool-to-hot waterfall; and a channel strip with per-channel `DET`/`ACT` bars
-filled in as the sweep visits each channel. An interactive simulation of the same screen (same fonts,
+filled in as the sweep visits each channel. Like the phone app, every capture
+refreshes only its own 20 MHz slice of a stitched band, so the waterfall keeps a
+fixed frequency axis while the sweep walks across it, and the peak hold decays
+2 dB per completed sweep. An interactive simulation of the same screen (same fonts,
 colours, layout, key handling and timings) is in
 [`docs/lcd-ui-preview.html`](docs/lcd-ui-preview.html) — download it and open it
 in a browser. While a USB/UART host is streaming, the panel stops retuning,
