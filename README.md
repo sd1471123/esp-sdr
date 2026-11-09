@@ -45,6 +45,46 @@ have been too much work.
 >
 > Releases: <https://github.com/sd1471123/esp-sdr/releases>.
 
+## Local LCD front panel (ESP32-C5)
+
+The `lcd` branch adds an optional front panel to the C5 build: a 320×240
+ST7789 SPI display, five keys and a buzzer, driven by the firmware itself — no
+host required. A prebuilt image is attached to the
+[`c5-lcd-1`](https://github.com/sd1471123/esp-sdr/releases/tag/c5-lcd-1)
+release.
+
+![ESP32-C5 front panel: 5 GHz sweep at 5280 MHz with spectrum, peak hold, waterfall and channel strip](docs/lcd-ui-preview.png)
+
+The panel sweeps the 2.4 GHz or 5 GHz band, or stays on one channel (`SWEEP` /
+`LIVE`), and draws the live spectrum with peak hold, a scrolling waterfall and a
+channel strip. While a USB/UART host is streaming, the panel stops retuning,
+mirrors the host's frequency and keeps its keys working; setting changes (band,
+mode, dB range, orientation, buzzer) are stored in NVS.
+
+| Key | Short press | Hold |
+| --- | --- | --- |
+| `LEFT` / `RIGHT` | channel step (auto-repeat after 0.4 s) | with `BAND` held: top dB, with `MODE` held: bottom dB |
+| `BAND` | 2.4 GHz ↔ 5 GHz | |
+| `MODE` | sweep ↔ live | |
+| `ROT` | rotate 90° | 5 s: reset to defaults |
+| `LEFT` + `RIGHT` | mute (buzzer and display updates off) | |
+
+Wiring: SCK 6, MOSI 7, CS 8, DC 9, RST 10, backlight 23; keys `LEFT` 2, `MODE`
+3, `BAND` 4, `ROT` 5, `RIGHT` 24 (active low, internal pull-ups); buzzer 1.
+These pins are reserved, the serial `GPIO` command cannot touch them.
+
+Build the LCD variant by adding the C5-LCD defaults file:
+
+```sh
+idf.py -B build-c5-lcd -DIDF_TARGET=esp32c5 \
+  -DSDKCONFIG=build-c5-lcd/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c5-lcd" build
+idf.py -B build-c5-lcd -p /dev/ttyACM0 flash
+```
+
+Menuconfig equivalent: *ESP-SDR local UI → Local LCD front panel*
+(`CONFIG_ESP_SDR_LOCAL_UI`, C5 only).
+
 ## Quick start
 
 1. Flash the firmware from the [browser installer](https://espargos.net/espsdr/app/flash.html).
@@ -157,6 +197,7 @@ Chip-specific notes: [ESP32-C2](docs/esp32c2.md), [ESP32-H2](docs/esp32h2.md).
 - `main/targets/<chip>/`: per-chip receiver, tuning and capture memory guard.
 - `main/families/c5_c6_c61/`: receiver shared by the C5, C6 and C61.
 - `main/targets/esp32s31/streaming/`: the S31 USB/Ethernet streaming application.
+- `main/local_ui/`: the C5 front panel (ST7789 driver, fonts, keys, buzzer, UI state machine).
 - `main/common/`: serial transport, gain, limits, bandwidth, spectrum and ring capture.
 - `main/diagnostics/`: optional register probes, not part of release builds.
 - `platform/esp32s2/`: patched copy of the ESP-IDF USB CDC console for the S2.
