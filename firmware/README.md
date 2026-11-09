@@ -1,12 +1,34 @@
 # ESP32-C5 LCD 固件
 
-为 ESP32-C5-DevKitC-1 + 8 针 ST7789 240×320 SPI 屏 + 5 键 + 有源蜂鸣器编译的
-`esp-sdr` 固件（`CONFIG_ESP_SDR_LOCAL_UI=y`）。
+为 ESP32-C5-DevKitC-1 + 8 针 3.2" 240×320 SPI 屏（GMT032-8P-SPI，**ST7789** 控制器）
++ 5 键 + 有源蜂鸣器编译的 `esp-sdr` 固件（`CONFIG_ESP_SDR_LOCAL_UI=y`）。
 
 面板原生 240×320，固件默认横屏使用（MADCTL `0x60`，坐标空间 320×240），
-按 R 可切回竖屏 240×320。
+按 R 可切回竖屏 240×320。`main/local_ui/st7789.c` 顶部另留了一个 ILI9341
+电源序列分支（`LCD_CTRL_ILI9341`），因为两种控制器外观完全一样，序列用错
+的表现都是满屏 GRAM 噪点。
 
 构建时间：2026-11-10，ESP-IDF v6.1，target `esp32c5`。
+
+## 接线自检开关
+
+`main/local_ui/st7789.c` 顶部有两个编译开关，用于排查手工接线时最容易搞反的
+两对相邻引脚：
+
+| 宏 | 作用 |
+|---|---|
+| `LCD_SWAP_SCL_SDI` | 1 = 按 SCL→GPIO7、SDI→GPIO6 驱动 |
+| `LCD_SWAP_DC_RST` | 1 = 按 RES→GPIO4、AO→GPIO5 驱动 |
+
+改宏后重新编译即可，不用动杜邦线。
+
+## 背光电流（务必看）
+
+GMT032 模块的背光是 6 颗 LED，工作电流约 **90–95 mA**，远超单个 GPIO 的
+承受能力（≤40 mA，推荐 20 mA）。**BL 不要直连 GPIO23**，二选一：
+
+- 应急：BL 直接接 3V3，常亮，切断 GPIO23 那根线；
+- 正规：S8050 低边开关，GPIO23 → 1 kΩ → 基极，发射极 GND，集电极接 BL。
 
 ## 文件
 
