@@ -201,11 +201,14 @@ static unsigned middle_index(void) { return (band_count() - 1) / 2; }
 
 static void layout_build(void) {
     unsigned w = lcd_width(), h = lcd_height();
-    if (w >= h) {
-        layout = (layout_t){30, 30, 94, 124, 84, 208, 32};
-    } else {
-        layout = (layout_t){30, 30, 134, 164, 120, 284, 36};
-    }
+    /* the channel strip only exists while sweeping; live gets the rows back */
+    bool strip = cfg.mode == UI_MODE_SWEEP || usb_active;
+    if (w >= h)
+        layout = strip ? (layout_t){30, 30, 94, 124, 84, 208, 32}
+                       : (layout_t){30, 30, 108, 138, 102, 240, 0};
+    else
+        layout = strip ? (layout_t){30, 30, 134, 164, 120, 284, 36}
+                       : (layout_t){30, 30, 150, 180, 140, 320, 0};
 }
 
 static void ui_text(unsigned x, unsigned y, const char *s, uint16_t fg, uint16_t bg, bool big) {
@@ -449,6 +452,7 @@ static void render_waterfall(unsigned w) {
 }
 
 static void render_strip(unsigned w) {
+    if (!layout.strip_h) return;
     unsigned top = layout.strip_y;
     lcd_fill_rect(0, top, w, layout.strip_h, COL_STRIP);
     lcd_fill_rect(0, top, w, 1, COL_BG);
@@ -754,6 +758,7 @@ static void toggle_band(void) {
 static void toggle_mode(void) {
     cfg.mode = cfg.mode == UI_MODE_SWEEP ? UI_MODE_LIVE : UI_MODE_SWEEP;
     if (cfg.mode == UI_MODE_SWEEP) channel = (uint8_t)middle_index();
+    layout_build();
     scan_index = 0;
     memset(band_codes, 0, sizeof(band_codes));
     memset(band_peak, 0, sizeof(band_peak));
