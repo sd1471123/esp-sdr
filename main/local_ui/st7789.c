@@ -143,6 +143,15 @@ bool lcd_init(void) {
     };
     if (spi_bus_add_device(LCD_SPI_HOST, &dev, &lcd_spi) != ESP_OK) return false;
 
+    /* Re-assert the control pins after the bus is up. GPIO4 and GPIO5 are the
+     * FSPI HD/WP pins by IO_MUX default on this part, so bringing up SPI2 is
+     * the one moment their function can be pulled out from under DC/RST. Doing
+     * this again costs nothing and rules that failure mode out. */
+    gpio_config(&out);
+    gpio_set_level(LCD_PIN_BL, 0);
+    gpio_set_level(PIN_DC, 1);
+    gpio_set_level(PIN_RST, 1);
+
     lcd_reset();
 #if LCD_CTRL_ILI9341
     lcd_cmd(0x01, NULL, 0); /* software reset */
