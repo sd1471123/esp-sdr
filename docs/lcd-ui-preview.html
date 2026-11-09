@@ -149,8 +149,7 @@ const CHORD_WINDOW_MS = 350;
 /* ---- 状态（对应 ui_settings_t + ui.c 静态变量） ---- */
 const DEFAULTS = { band: 1, mode: 0, landscape: 1, buzz: 1, mute: 0, top_db: -26, bottom_db: -105 };
 const cfg = { ...DEFAULTS };
-let channel = 0, scan_index = 0;
-let muted = false, usbActive = false;
+let channel = 0, muted = false, usbActive = false;
 let hostFreq = 5280;
 let sel_x = 0;
 let lastStep = 0;
@@ -167,9 +166,16 @@ let haveData = false;
 let pk_db = 0, act_db = 0, det_pct = 0;
 const chPkDb = new Int8Array(36), chActDb = new Int8Array(36);
 const chSeen = new Uint8Array(36);
-/* Running sweep average (power domain) and max hold, as in the phone app. */
-const specSum = new Float32Array(320);
-const specCnt = new Uint16Array(320);
+/* Peak hold of the window on screen (reset when the sweep hops). */
+const winPeak = new Uint8Array(FFT_BINS);
+let lastTuned = -1;
+let sweepIndex = 0;
+const colSeen = new Uint8Array(40);
+const chHits = new Uint16Array(36);
+let sweeps = 0;
+let viewTop = -30, viewBot = -100, manualRange = false;
+function colSeenBit(x) { return (colSeen[x >> 3] >> (x & 7)) & 1; }
+function colSeenSet(x) { colSeen[x >> 3] |= 1 << (x & 7); }
 
 /* ---- 画布与布局 ---- */
 const canvas = document.getElementById('lcd');
@@ -279,6 +285,15 @@ function drawMuteIcon(right, cy) {
 function bandCount() { return cfg.band === 1 ? 36 : 13; }
 function bandNumber(i) { return cfg.band === 1 ? 36 + i * 4 : i + 1; }
 function bandMhz(i) { return cfg.band === 1 ? 5180 + i * 20 : 2412 + i * 5; }
+function bandLo() { return cfg.band === 1 ? 5150 : 2400; }
+function bandHi() { return cfg.band === 1 ? 5895 : 2500; }
+function sweepSteps() { return ((bandHi() + 10 - (bandLo() - 10)) / 20 | 0) + 1; }
+function sweepLo(i) { return bandLo() - 10 + i * 20; }
+function columnOf(mhz) {
+  const span = bandHi() - bandLo();
+  const c = ((mhz - bandLo()) * (W - 1) / span) | 0;
+  return (c < 0 || c >= W) ? -1 : c;
+}
 function bandLabel() { return cfg.band === 1 ? "5G" : "2.4G"; }
 /* ch104 in 5G, ch7 in 2.4G: where the cursor and the sweep start (design spec). */
 function middleIndex() { return (bandCount() - 1) / 2 | 0; }
@@ -286,10 +301,40 @@ function middleIndex() { return (bandCount() - 1) / 2 | 0; }
 /* ---- 频谱电平映射（ui.c: level_of） ---- */
 function levelOf(code, h) {
   const db = (code / 2 | 0) - 84;
-  let range = cfg.top_db - cfg.bottom_db;
-  if (range < 5) range = 5;
-  let lv = ((db - cfg.bottom_db) * h / range) | 0;
+  const range = Math.max(5, viewTop - viewBot);
+  const lv = ((db - viewBot) * h / range) | 0;
   return Math.max(0, Math.min(h, lv));
+}
+
+/* 纵轴自适应：底噪 +55 dB 或最强峰 +8 dB，上升 0.4 / 下降 0.06 */
+function updateViewScale() {
+  if (manualRange) { viewTop = cfg.top_db; viewBot = cfg.bottom_db; return; }
+  const bandView = cfg.mode === 0 || usbActive;
+  const hist = [];
+  let strongest = 0;
+  for (let k = 0; k < 64; k++) {
+    const x = Math.round(k * (W - 1) / 63);
+    if (bandView) {
+      if (!colSeenBit(x)) continue;
+      hist.push((bandCodes[x] / 2 | 0) - 84);
+      if (bandPeak[x] > strongest) strongest = bandPeak[x];
+    } else {
+      hist.push((lerpCodes(codes, x, W) / 2 | 0) - 84);
+      const wi = Math.round(k * (FFT_BINS - 1) / 63);
+      if (winPeak[wi] > strongest) strongest = winPeak[wi];
+    }
+  }
+  if (!hist.length) return;
+  hist.sort((a, b) => a - b);
+  const floorDb = hist[hist.length / 5 | 0];
+  let target = floorDb + 55;
+  const peakDb = (strongest / 2 | 0) - 84;
+  if (peakDb > target - 8) target = peakDb + 8;
+  const delta = target - viewTop;
+  let step = Math.trunc(delta * (delta > 0 ? 40 : 6) / 100);
+  if (delta && !step) step = delta > 0 ? 1 : -1;
+  viewTop += step;
+  viewBot = viewTop - 70;
 }
 /* ---- 模拟 RF：按信道频率生成稳定的信号 + 每次采集的抖动 ---- */
 function hash32(n) {
@@ -326,9 +371,10 @@ function psdDb(f) {
   return p;
 }
 function makeCodes(mhz, tick, out) {
+  /* 80 MS/s capture: +/-40 MHz, 0.3125 MHz per bin, like the app's sweep step */
   const rnd = mulberry32(hash32(mhz * 7919 + tick * 131));
   for (let i = 0; i < FFT_BINS; i++) {
-    const f = mhz - 10 + (i + 0.5) * 20 / FFT_BINS;
+    const f = mhz - 40 + (i + 0.5) * 80 / FFT_BINS;
     const db = psdDb(f) + (rnd() - 0.5) * 1.4;
     out[i] = Math.max(0, Math.min(255, Math.round((db + 84) * 2)));
   }
@@ -351,86 +397,86 @@ function analyse() {
 
 function waterfallPush() {
   const row = wfNext * WF_STRIDE;
-  for (let x = 0; x < W; x++) wf[row + x] = bandCodes[x];
+  const bandView = cfg.mode === 0 || usbActive;
+  for (let x = 0; x < W; x++)
+    wf[row + x] = bandView ? bandCodes[x] : Math.round(lerpCodes(codes, x, W));
   wfNext = (wfNext + 1) % L.wf_h;
+}
+
+function lerpCodes(src, x, w) {
+  const num = x * (src.length - 1), den = Math.max(1, w - 1);
+  const i = Math.min(src.length - 1, Math.floor(num / den));
+  const f = (num % den) / den;
+  const a = src[i], b = src[Math.min(src.length - 1, i + 1)];
+  return a + (b - a) * f;
 }
 
 /* Bars come from the finished sweep, like the phone app: while a pass is running
  * the strip keeps the previous result instead of sampling the window just captured. */
-function rebuildChannelStats() {
+function publishBars() {
   const count = bandCount();
-  const sample = [];
-  for (let k = 0; k < 64; k++) sample.push(bandCodes[Math.round(k * (W - 1) / 63)]);
-  sample.sort((a, b) => a - b);
-  const noise = sample[16];
+  const bandView = cfg.mode === 0 || usbActive;
+  const hist = [];
+  for (let k = 0; k < 64; k++) {
+    const x = Math.round(k * (W - 1) / 63);
+    if (bandView) { if (!colSeenBit(x)) continue; hist.push((bandCodes[x] / 2 | 0) - 84); }
+    else hist.push((lerpCodes(codes, x, W) / 2 | 0) - 84);
+  }
+  if (!hist.length) return;
+  hist.sort((x, y) => x - y);
+  const floorDb = hist[hist.length / 5 | 0];
+  sweeps++;
   for (let c = 0; c < count && c < 36; c++) {
-    const lo = c * W / count | 0, hi = (c + 1) * W / count | 0;
-    let pk = 0, sum = 0, det = 0, n = 0;
-    for (let x = lo; x < Math.max(lo + 1, hi) && x < W; x++) {
-      if (bandPeak[x] > pk) pk = bandPeak[x];
-      sum += bandCodes[x];
-      if (bandCodes[x] > noise + 16) det++;
-      n++;
+    const centre = bandMhz(c);
+    let pk = 0;
+    for (let f = Math.max(0, centre - 8); f <= centre + 8; f++) {
+      const col = columnOf(f);
+      if (col < 0) continue;
+      if (bandPeak[col] > pk) pk = bandPeak[col];
     }
-    if (!n) continue;
     const pkDb = (pk / 2 | 0) - 84;
-    const actDb = ((sum / n | 0) - noise) / 2 | 0;
-    chPk[c] = Math.max(0, Math.min(100, Math.trunc((pkDb - (cfg.bottom_db + 4)) * 100 / 50)));
-    chAct[c] = Math.max(0, Math.min(100, Math.trunc(actDb * 100 / 60)));
-    chDet[c] = Math.trunc(det * 100 / n);
-    chPkDb[c] = pkDb; chActDb[c] = actDb; chSeen[c] = 1;
+    const act = Math.max(0, pkDb - floorDb);
+    if (act >= 12) chHits[c]++;
+    chPk[c] = Math.min(100, act);
+    chAct[c] = Math.min(100, Math.trunc(act * 100 / 60));
+    chDet[c] = sweeps ? Math.trunc(100 * chHits[c] / sweeps) : 0;
+    chPkDb[c] = pkDb; chActDb[c] = act; chSeen[c] = 1;
   }
 }
 
 function acquire() {
-  const count = bandCount();
   const sweep = cfg.mode === 0;
-  if (sweep) {
-    scan_index = (scan_index + 1) % count;
-    if (scan_index === 0) {
-      /* one full pass done: the phone app drops PEAK_DECAY_DB (2 dB) from the hold */
-      for (let x = 0; x < W; x++) if (bandPeak[x]) bandPeak[x]--;
-      specSum.fill(0);
-      specCnt.fill(0);
-      rebuildChannelStats();
-    }
-  }
-  const tuned = sweep ? scan_index : channel;
-  const mhz = bandMhz(tuned);
+  const mhz = sweep ? sweepLo(sweepIndex) : bandMhz(channel);
   makeCodes(mhz, acqTick++, codes);
   haveData = true;
-  const lo = sweep ? (tuned * W / count | 0) : 0;
-  let hi = sweep ? ((tuned + 1) * W / count | 0) : W;
-  if (hi <= lo) hi = lo + 1;
-  if (hi > W) hi = W;
-  const span = hi - lo;
-  for (let x = lo; x < hi; x++) {
-    const b0 = Math.min(FFT_BINS - 1, ((x - lo) * FFT_BINS / span) | 0);
-    const b1 = Math.max(b0 + 1, Math.min(FFT_BINS, (((x + 1 - lo) * FFT_BINS / span) | 0)));
-    let p = 0;
-    for (let b = b0; b < b1; b++) p += Math.pow(10, (codes[b] * 0.5 - 84) * 0.1);
-    const v = Math.max(0, Math.min(255, Math.round((10 * Math.log10(p / (b1 - b0)) + 84) * 2)));
-    if (sweep) {
-      const db = v * 0.5 - 84;
-      specSum[x] += Math.pow(10, db * 0.1);
-      specCnt[x]++;
-      const avg = 10 * Math.log10(specSum[x] / specCnt[x]);
-      bandCodes[x] = Math.max(0, Math.min(255, Math.round((avg + 84) * 2)));
-    } else {
-      bandCodes[x] = v;
+  if (sweep) {
+    /* 只取 80 MS/s 采集的 ±10..20 MHz 环带，跳过 LO 附近的直流区 */
+    const df = 80 / FFT_BINS;
+    for (let j = 0; j < FFT_BINS; j++) {
+      const rel = (j - FFT_BINS / 2 + 0) * df;
+      const a = Math.abs(rel);
+      if (a < 10 || a > 20) continue;
+      const col = columnOf(Math.round(mhz + rel));
+      if (col < 0) continue;
+      colSeenSet(col);
+      if (codes[j] >= bandPeak[col]) bandPeak[col] = codes[j];
+      bandCodes[col] = codes[j];
     }
-    if (v >= bandPeak[x]) bandPeak[x] = v;
+    if (++sweepIndex >= sweepSteps()) {
+      sweepIndex = 0;
+      for (let x = 0; x < W; x++) bandPeak[x] = bandPeak[x] > 4 ? bandPeak[x] - 4 : 0;
+      publishBars();
+    }
+  } else {
+    if (channel !== lastTuned) { winPeak.fill(0); lastTuned = channel; }
+    for (let i = 0; i < FFT_BINS; i++) {
+      if (codes[i] >= winPeak[i]) winPeak[i] = codes[i];
+      else if (winPeak[i]) winPeak[i]--;
+    }
+    publishBars();
   }
   analyse();
-  if (!sweep) {
-    const lv = Math.max(0, Math.min(100, Math.trunc((pk_db - (cfg.bottom_db + 4)) * 100 / 50)));
-    const ac = Math.max(0, Math.min(100, Math.trunc(act_db * 100 / 60)));
-    chPk[tuned] = lv;
-    chAct[tuned] = ac;
-    chDet[tuned] = Math.max(0, Math.min(100, det_pct));
-    chPkDb[tuned] = pk_db; chActDb[tuned] = act_db; chSeen[tuned] = 1;
-    rebuildChannelStats();
-  }
+  updateViewScale();
   waterfallPush();
 }
 
@@ -478,10 +524,10 @@ function renderTop() {
 function renderSpectrum() {
   const h = L.spec_h, w = W;
   fillRect(0, L.spec_y, w, h, C.specBg);
-  const range = Math.max(5, cfg.top_db - cfg.bottom_db);
-  const yOf = db => h - (db - cfg.bottom_db) * h / range;
-  for (let db = -120; db <= 0; db += 20) {
-    if (db < cfg.bottom_db || db > cfg.top_db) continue;
+  const range = Math.max(5, viewTop - viewBot);
+  const yOf = db => h - (db - viewBot) * h / range;
+  for (let db = -140; db <= 20; db += 20) {
+    if (db < viewBot || db > viewTop) continue;
     const y = yOf(db) | 0;
     if (y >= 0 && y < h) fillRect(0, L.spec_y + y, w, 1, C.grid);
   }
@@ -489,8 +535,9 @@ function renderSpectrum() {
   if (haveData) {
     let prev = -1;
     for (let x = 0; x < w; x++) {
-      const mean = levelOf(bandCodes[x], h);
-      let hold = levelOf(bandPeak[x], h);
+      const bandView = cfg.mode === 0 || usbActive;
+      const mean = levelOf(bandView ? bandCodes[x] : lerpCodes(codes, x, w), h);
+      let hold = levelOf(bandView ? bandPeak[x] : lerpCodes(winPeak, x, w), h);
       if (hold < mean) hold = mean;
       let y = h - 1 - mean;
       if (y < 0) y = 0;
@@ -503,15 +550,16 @@ function renderSpectrum() {
       setPx(x, L.spec_y + ph, C.peak);
     }
   }
-  for (let db = -120; db <= 0; db += 20) {
-    if (db < cfg.bottom_db || db > cfg.top_db) continue;
+  for (let db = -140; db <= 20; db += 20) {
+    if (db < viewBot || db > viewTop) continue;
     const y = yOf(db) | 0;
     if (y <= 9 || y >= h - 11) continue;
     text(3, L.spec_y + y - 8, String(db), C.dim, C.specBg, false);
   }
   const shown = usbActive ? hostFreq : bandMhz(channel);
-  let loMhz = shown - 10, hiMhz = shown + 10;
-  if (!usbActive && cfg.mode === 0) { loMhz = bandMhz(0) - 10; hiMhz = bandMhz(bandCount() - 1) + 10; }
+  const bandView = cfg.mode === 0 || usbActive;
+  const loMhz = bandView ? bandLo() : shown - 10;
+  const hiMhz = bandView ? bandHi() : shown + 10;
   text(4, L.spec_y + h - 10, String(loMhz), C.dim, C.specBg, false);
   const hiTxt = String(hiMhz);
   text(w - 4 - textW(hiTxt), L.spec_y + h - 10, hiTxt, C.dim, C.specBg, false);
@@ -519,7 +567,9 @@ function renderSpectrum() {
     for (let y = 0; y < h; y += 5) fillRect(w / 2 | 0, L.spec_y + y, 1, Math.min(3, h - y), C.glow);
     text(4, L.spec_y + 4, "LIVE 20M", C.glow, C.specBg, false);
   } else {
-    const lab = `ch${bandNumber(channel)} ${shown}M  ${det_pct}%`;
+    const lab = cfg.mode === 0 && !usbActive
+      ? `ch${bandNumber(channel)} ${sweepIndex + 1}/${sweepSteps()} ${chSeen[channel] ? chDet[channel] : det_pct}%`
+      : `ch${bandNumber(channel)} ${shown}M  ${det_pct}%`;
     const lw = textW(lab) + 10;
     fillRoundRect(3, L.spec_y + 5, lw, 13, 3, C.callout);
     roundRectBorder(3, L.spec_y + 5, lw, 13, 3, C.accent);
@@ -528,12 +578,12 @@ function renderSpectrum() {
 }
 
 function renderWaterfall() {
-  const range = Math.max(5, cfg.top_db - cfg.bottom_db);
+  const range = Math.max(5, viewTop - viewBot);
   for (let r = 0; r < L.wf_h; r++) {
     const src = ((wfNext + r) % L.wf_h) * WF_STRIDE;
     for (let x = 0; x < W; x++) {
       const db = (wf[src + x] / 2 | 0) - 84;
-      const idx = Math.max(0, Math.min(255, Math.trunc((db - cfg.bottom_db) * 255 / range)));
+      const idx = Math.max(0, Math.min(255, Math.trunc((db - viewBot) * 255 / range)));
       setPx(x, L.wf_y + r, wfPalette[idx]);
     }
   }
@@ -549,7 +599,7 @@ function renderStrip() {
   const detH = 7, actH = 7, barGap = 2;
   const actY = y + h - actH, detY = actY - barGap - detH;
   const labelY = y + Math.floor((detY - y - 7) / 2);
-  let selected = usbActive ? Math.floor(sel_x * count / W) : (cfg.mode === 0 ? scan_index : channel);
+  let selected = usbActive ? Math.floor(sel_x * count / W) : channel;
   if (selected >= count) selected = count - 1;
   for (let i = 0; i < count; i++) {
     const x = margin + i * (cw + gap);
@@ -729,8 +779,9 @@ function adjustLimit(top, dir) {
 function toggleBand() {
   cfg.band = cfg.band === 1 ? 0 : 1;
   channel = middleIndex();
-  scan_index = 0;
-  bandCodes.fill(0); bandPeak.fill(0);
+    bandCodes.fill(0); bandPeak.fill(0); colSeen.fill(0);
+  chHits.fill(0); sweeps = 0; sweepIndex = 0; winPeak.fill(0);
+  viewTop = -30; viewBot = -100; manualRange = false;
   wf.fill(0);
   wfNext = 0;
   chPk.fill(0); chAct.fill(0); chDet.fill(0);
@@ -743,8 +794,8 @@ function toggleBand() {
 function toggleMode() {
   cfg.mode = cfg.mode === 0 ? 1 : 0;
   if (cfg.mode === 0) channel = middleIndex();
-  scan_index = cfg.mode === 0 ? 0 : channel;
-  bandCodes.fill(0); bandPeak.fill(0);
+    bandCodes.fill(0); bandPeak.fill(0); colSeen.fill(0);
+  sweepIndex = 0; winPeak.fill(0);
   wf.fill(0);
   wfNext = 0;
   haveData = false;
@@ -769,8 +820,7 @@ function resetDefaults() {
   try { localStorage.removeItem(STORE_KEY); } catch (e) {}
   chSeen.fill(0);
   channel = middleIndex();
-  scan_index = 0;
-  lastStep = 0;
+    lastStep = 0;
   allocBuffer();
   wfNext = 0;
   bandCodes.fill(0); bandPeak.fill(0);
@@ -924,7 +974,6 @@ allocBuffer();
 if (cfg.landscape) { /* already */ }
 muted = !!cfg.mute;
 channel = middleIndex();
-scan_index = 0;
 wf.fill(0); bandCodes.fill(0); bandPeak.fill(0);
 haveData = false;
 render();
