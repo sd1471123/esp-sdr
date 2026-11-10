@@ -106,10 +106,12 @@ static void trace(const char *fmt, ...) { (void)fmt; }
 #define COL_MUTE    0xF800
 
 #define SWEEP_PERIOD_US  80000
-/* A full 320x240 repaint is 153 KB, which takes ~0.31 s at 4 MHz, so asking for
- * 10 fps only made the panel chase the renderer and the picture crawled down
- * the screen. Match the period to what the bus can actually deliver. */
-#define RENDER_PERIOD_US 120000
+/* A frame moves ~134 KB over the 4 MHz bus (~270 ms). Asking for less than that
+ * made render() start the next frame the instant it returned, so the panel never
+ * got a still picture and the write seam never stopped moving. 300 ms leaves a
+ * short stable window. The RF engine still gets slots inside the frame, so the
+ * sweep keeps its 80 ms cadence. */
+#define RENDER_PERIOD_US 300000
 #define HOST_PERIOD_US   500000
 
 typedef struct {
@@ -675,15 +677,19 @@ static void render_spectrum(unsigned w) {
 static void render_waterfall(unsigned w) {
     unsigned rows = layout.wf_h;
     if (!rows) return;
-    /* Stretch the fixed-depth ring over the layout height instead of indexing
-     * the ring by it. Nearest neighbour is fine: at most two screen rows share
-     * a history row. */
+    /* One window and one continuous RAMWR stream for the whole strip. Re-opening
+     * a one-row window per line cost a command burst and a CS edge each time, and
+     * let the panel's own scan interleave with the write — in LIVE that read as a
+     * seam walking down the screen. The ring index is frozen for this frame, and
+     * no capture runs while it is being read, so the rows cannot shift under us. */
+    unsigned base = wf_next;
     int range = view_top_db - view_bot_db;
     if (range < 5) range = 5;
+    lcd_set_window(0, layout.wf_y, w, rows);
     for (unsigned r = 0; r < rows; r++) {
         unsigned src_r = rows > WF_ROWS_MAX ? r * WF_ROWS_MAX / rows : r;
         if (src_r >= WF_ROWS_MAX) src_r = WF_ROWS_MAX - 1;
-        const uint8_t *src = wf + ((wf_next + src_r) % WF_ROWS_MAX) * WF_STRIDE;
+        const uint8_t *src = wf + ((base + src_r) % WF_ROWS_MAX) * WF_STRIDE;
         for (unsigned x = 0; x < w; x++) {
             int db = (int)(src[x] / 2) - 84;
             int idx = (db - view_bot_db) * 255 / range;
@@ -691,11 +697,10 @@ static void render_waterfall(unsigned w) {
             if (idx > 255) idx = 255;
             wf_line[x] = wf_palette[idx];
         }
-        lcd_set_window(0, layout.wf_y + r, w, 1);
-        lcd_pixels(wf_line, w);
+        lcd_pixels_cont(wf_line, w);
         if ((r & 7) == 7) pump_buttons();
-        if ((r & 15) == 15) maybe_acquire();
     }
+    lcd_pixels_end();
 }
 
 /* The strip used to be blanked and rebuilt in full on every frame, which read
@@ -915,6 +920,9 @@ static void render(void) {
     maybe_acquire();
     render_strip(w);
     render_overlays(w);
+    /* The waterfall no longer offers capture slots (they made its rows shift
+     * mid-frame), so give the RF engine one more chance at the tail. */
+    maybe_acquire();
 }
 
 /* Publish the channel bars when a pass ends, using the phone app's rules: the

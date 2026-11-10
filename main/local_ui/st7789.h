@@ -13,6 +13,10 @@ void lcd_fill(uint16_t color);
 void lcd_fill_rect(unsigned x, unsigned y, unsigned w, unsigned h, uint16_t color);
 void lcd_set_window(unsigned x, unsigned y, unsigned w, unsigned h);
 void lcd_pixels(const uint16_t *pixels, unsigned count);
+/* Multi-call pixel stream: lcd_set_window() once, lcd_pixels_cont() per row,
+ * then lcd_pixels_end(). CS stays low for the whole window. */
+void lcd_pixels_cont(const uint16_t *pixels, unsigned count);
+void lcd_pixels_end(void);
 /* 2 bits per pixel, most significant bits first; 4-entry RGB565 palette. */
 void lcd_draw_bitmap2(unsigned x, unsigned y, unsigned w, unsigned h, const uint8_t *pixels,
                       const uint16_t palette[4]);

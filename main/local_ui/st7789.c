@@ -333,7 +333,11 @@ void lcd_set_window(unsigned x, unsigned y, unsigned w, unsigned h) {
     gpio_set_level(PIN_DC, 1);
 }
 
-void lcd_pixels(const uint16_t *pixels, unsigned count) {
+/* Stream pixels without dropping CS. Several calls in a row become one long
+ * RAMWR, which is what the waterfall needs: re-opening a one-row window for
+ * every line costs a command burst and a CS edge per row, and lets the panel's
+ * own scan run between rows. */
+void lcd_pixels_cont(const uint16_t *pixels, unsigned count) {
     while (count) {
         unsigned chunk = count > STAGE_PIXELS ? STAGE_PIXELS : count;
         for (unsigned j = 0; j < chunk; j++) {
@@ -346,8 +350,14 @@ void lcd_pixels(const uint16_t *pixels, unsigned count) {
         pixels += chunk;
         count -= chunk;
     }
+}
+
+void lcd_pixels(const uint16_t *pixels, unsigned count) {
+    lcd_pixels_cont(pixels, count);
     cs_release();
 }
+
+void lcd_pixels_end(void) { cs_release(); }
 
 void lcd_fill_rect(unsigned x, unsigned y, unsigned w, unsigned h, uint16_t color) {
     if (!w || !h) return;
