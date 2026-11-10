@@ -381,6 +381,37 @@ static void mask_rect(unsigned x, unsigned y, unsigned w, unsigned h, unsigned i
         for (unsigned dx = 0; dx < w; dx++) mask_put(x + dx, y + dy, idx);
 }
 
+/* 7x12 variant for the status bar. Composing the whole bar into the mask and
+ * sending it in one window is what finally stopped it flickering: the old
+ * repaint cleared 30 rows and then opened six or seven tiny windows for the
+ * pill, labels and icon, so the panel's scan kept cutting across the middle of
+ * a half-rebuilt bar. */
+static void mask_text_big(unsigned x, unsigned y, const char *s, unsigned idx) {
+    unsigned sw = lcd_width();
+    unsigned n = (unsigned)strlen(s), cw = FONT7X12_W + 1;
+    for (unsigned row = 0; row < FONT7X12_H; row++) {
+        for (unsigned i = 0; i < n; i++) {
+            unsigned ch = (unsigned char)s[i];
+            unsigned bits = (ch >= 32 && ch < 127) ? font7x12[ch - 32][row] : 0;
+            for (unsigned col = 0; col < FONT7X12_W; col++) {
+                if (!((bits >> col) & 1)) continue;
+                unsigned px = x + i * cw + col;
+                if (px < sw) mask_put(px, y + row, idx);
+            }
+        }
+    }
+}
+
+static void mask_mute_icon(unsigned right, unsigned cy) {
+    unsigned x = right - 11;
+    mask_rect(x, cy - 1, 3, 3, 1);
+    mask_rect(x + 2, cy - 3, 2, 7, 1);
+    for (unsigned i = 0; i < 4; i++) {
+        mask_put(x + 6 + i, cy - 2 + i, 2);
+        mask_put(x + 9 - i, cy - 2 + i, 2);
+    }
+}
+
 static int level_of(unsigned code, unsigned h) {
     int db = (int)code / 2 - 84;
     int range = (int)cfg.top_db - (int)cfg.bottom_db;
@@ -427,16 +458,6 @@ static void round_rect_border(unsigned x, unsigned y, unsigned w, unsigned h, un
         lcd_fill_rect(x + w - 1 - inset, y + dy, 1, 1, color);
         lcd_fill_rect(x + inset, y + h - 1 - dy, 1, 1, color);
         lcd_fill_rect(x + w - 1 - inset, y + h - 1 - dy, 1, 1, color);
-    }
-}
-
-static void draw_mute_icon(unsigned right, unsigned cy) {
-    unsigned x = right - 11;
-    lcd_fill_rect(x, cy - 1, 3, 3, COL_DIM);
-    lcd_fill_rect(x + 2, cy - 3, 2, 7, COL_DIM);
-    for (unsigned i = 0; i < 4; i++) {
-        lcd_fill_rect(x + 6 + i, cy - 2 + i, 1, 1, COL_RED);
-        lcd_fill_rect(x + 9 - i, cy - 2 + i, 1, 1, COL_RED);
     }
 }
 
@@ -509,41 +530,52 @@ static void render_top(unsigned w) {
         top_cache.ch == channel && top_cache.mhz == shown && top_cache.edge == edge0)
         return;
 
-    /* In LIVE the pk/act/det numbers change on every capture, so the cache
-     * above misses almost every frame. Repainting the bar means ~30 one-row
-     * fill windows plus several text windows, all stacked inside the first 30
-     * scanlines — that is what made the top bar look like it was rolling too.
-     * Throttle numeric-only updates; mode/band/mute/channel changes still paint
-     * immediately. */
+    /* LIVE changes pk/act/det on every capture, so the cache above misses
+     * almost every frame. The repaint is now one atomic bitmap, this throttle
+     * only keeps the numbers from twitching at the capture rate. Structural
+     * changes (mode/band/mute/channel) still paint immediately. */
     static int64_t last_top_us;
     int64_t now_us = esp_timer_get_time();
     bool structural = !top_cache.valid || top_cache.live != live ||
                       top_cache.muted != muted || top_cache.ch != channel ||
                       top_cache.mhz != shown || top_cache.edge != edge0;
-    if (!structural && now_us - last_top_us < 500000) return;
+    if (!structural && now_us - last_top_us < 250000) return;
     last_top_us = now_us;
 
-    lcd_fill_rect(0, 0, w, top, COL_PANEL);
-    lcd_fill_rect(0, top - 1, w, 1, COL_BG);
-
-    const char *band = cfg.band == UI_BAND_5G ? "5G" : "2.4G";
-    ui_text(4, ty, band, COL_TEXT, COL_PANEL, true);
-
+    /* Compose the whole bar into the shared 2-bit mask and send it as ONE
+     * bitmap. mask is free here — render_spectrum() clears it before its own
+     * pass. Four colours suffice: panel, text, accent, tint. No fill_rect, no
+     * text windows and no CS edges between the 30 rows, so the panel scan can
+     * no longer cut through a half-rebuilt status bar. */
+    unsigned stride = (w + 3) / 4;
+    memset(mask, 0, stride * top);
     uint16_t tint = live ? COL_TINT_G : COL_TINT_O;
     uint16_t edge = live ? COL_GREEN : COL_PEAK;
+    uint16_t pal[4] = {COL_PANEL, COL_TEXT, edge, tint};
+
+    const char *band = cfg.band == UI_BAND_5G ? "5G" : "2.4G";
+    mask_text_big(4, ty, band, 1);
+
     unsigned bx = 4 + text_w_big(band) + 5;
     unsigned bw = 46, bh = FONT7X12_H + 8, by = (top - bh) / 2;
-    fill_round_rect(bx, by, bw, bh, 4, tint);
-    round_rect_border(bx, by, bw, bh, 4, edge);
+    mask_rect(bx, by, bw, bh, 3);
+    mask_rect(bx, by, bw, 1, 2);
+    mask_rect(bx, by + bh - 1, bw, 1, 2);
+    mask_rect(bx, by, 1, bh, 2);
+    mask_rect(bx + bw - 1, by, 1, bh, 2);
+    mask_put(bx, by, 0);
+    mask_put(bx + bw - 1, by, 0);
+    mask_put(bx, by + bh - 1, 0);
+    mask_put(bx + bw - 1, by + bh - 1, 0);
     const char *mode = live ? "LIVE" : "SWEEP";
-    ui_text(bx + (bw - text_w_big(mode)) / 2, ty, mode, edge, tint, true);
+    mask_text_big(bx + (bw - text_w_big(mode)) / 2, ty, mode, 2);
 
     char line[40];
     if (w >= 300)
         snprintf(line, sizeof(line), "PK%d A%d D%d%%", dpk, dact, ddet);
     else
         snprintf(line, sizeof(line), "P%d D%d%%", dpk, ddet);
-    ui_text(bx + bw + 6, ty, line, COL_MUTED, COL_PANEL, true);
+    mask_text_big(bx + bw + 6, ty, line, 1);
 
     if (w >= 300)
         snprintf(line, sizeof(line), "ch%u %uM", band_number(channel), shown);
@@ -551,8 +583,10 @@ static void render_top(unsigned w) {
         snprintf(line, sizeof(line), "%u/%uM", band_number(channel), shown);
     unsigned tw = text_w_big(line);
     unsigned tx = (w > 4 + tw) ? w - 4 - tw : 0;
-    ui_text(tx, ty, line, COL_TEXT, COL_PANEL, true);
-    if (muted) draw_mute_icon(tx > 12 ? tx - 6 : w - 2, top / 2);
+    mask_text_big(tx, ty, line, 1);
+    if (muted) mask_mute_icon(tx > 12 ? tx - 6 : w - 2, top / 2);
+
+    lcd_draw_bitmap2(0, 0, w, top, mask, pal);
 
     top_cache.valid = true;
     top_cache.live = live;
