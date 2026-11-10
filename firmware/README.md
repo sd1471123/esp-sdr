@@ -9,25 +9,32 @@
 
 构建时间：2026-11-10，ESP-IDF v6.1，target `esp32c5`。
 
-## 两套固件，先选一套
+## 三套固件，先选一套
 
-| 镜像 | host 串口 | UI 日志 | 用在哪 |
+| 镜像 | host 串口 | SPI 时钟 | 用在哪 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` / `esp32c5-lcd-app.bin` | UART0 **2 Mbaud** | 关 | 正式版，可接上位机 burst 协议 |
-| `esp32c5-lcd-full-diag.bin` / `esp32c5-lcd-app-diag.bin` | UART0 **115200** | 开 | 调试版，CH340 转接板上能看 `UI tick ...` 电平日志 |
+| `esp32c5-lcd-full.bin` / `esp32c5-lcd-app.bin` | UART0 **2 Mbaud** | **8 MHz** | 默认正式版，画面最稳 |
+| `esp32c5-lcd-full-4mhz.bin` / `esp32c5-lcd-app-4mhz.bin` | UART0 **2 Mbaud** | 4 MHz | 8 MHz 花屏时的回退版，其余代码完全相同 |
+| `esp32c5-lcd-full-diag.bin` / `esp32c5-lcd-app-diag.bin` | UART0 **115200** | 4 MHz | 调试期快照，CH340 上能看 `UI tick ...` 电平日志 |
 
-两者只差 `CONFIG_ESP_SDR_UART_BAUD`。`ui.c` 里的 `UI_TRACE` 会跟着这个宏自动开关：115200 时往 UART0 打日志，
+正式版与回退版只差 `LCD_SPI_HZ`。8 MHz 把一帧的写屏时间从约 270 ms 压到
+约 135 ms，是消除撕裂最有效的一招；如果这组杜邦线在 8 MHz 下出现雪花、
+竖线或纯白，直接烧 `esp32c5-lcd-full-4mhz.bin` 回退即可，不用改代码。
+
+正式版与诊断版只差 `CONFIG_ESP_SDR_UART_BAUD`。`ui.c` 里的 `UI_TRACE` 会跟着这个宏自动开关：115200 时往 UART0 打日志，
 2 Mbaud 时静默，否则 UI 文本会混进 host 协议流。USB-Serial-JTAG 口不受影响。
 
-`*-diag.bin` 是 13:25 的调试期快照，**不含** 14:13 新增的 20 MHz 选中选框
-（见下）；需要带选框的诊断版请按下面的诊断构建步骤重编一次。
+`*-diag.bin` 是 13:25 的调试期快照，**不含**此后的选中选框与渲染修复；
+需要带新 UI 的诊断版请按下面的诊断构建步骤重编一次。
 
 ## 文件
 
 | 文件 | 偏移 | 大小 | 说明 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` | `0x0` | 944736 | **正式版**合并镜像，一次烧完 |
-| `esp32c5-lcd-app.bin` | `0x10000` | 879200 | 正式版应用（占 1 MB 分区 84%） |
+| `esp32c5-lcd-full.bin` | `0x0` | 944800 | **正式版**合并镜像（8 MHz），一次烧完 |
+| `esp32c5-lcd-app.bin` | `0x10000` | 879264 | 正式版应用（占 1 MB 分区 84%） |
+| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 944800 | 4 MHz 回退合并镜像 |
+| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 879264 | 4 MHz 回退应用 |
 | `esp32c5-lcd-full-diag.bin` | `0x0` | 945792 | 诊断版合并镜像（115200 + UI 日志） |
 | `esp32c5-lcd-app-diag.bin` | `0x10000` | 877648 | 诊断版应用 |
 | `esp32c5-lcd-pinprobe.bin` | `0x10000` | 136736 | 引脚探针，只烧应用，见下 |
@@ -66,6 +73,10 @@ bash build.sh build
 cp build/esp_sdr.bin firmware/esp32c5-lcd-app.bin
 python merge_full.py
 ```
+
+`merge_full.py` 可带一个输出路径参数，用来生成 4 MHz 回退镜像：把
+`st7789.c` 的 `LCD_SPI_HZ` 临时改成 4000000 重新 build，然后
+`python merge_full.py firmware/esp32c5-lcd-full-4mhz.bin`，改回 8000000 即可。
 
 诊断版：在 `SDKCONFIG_DEFAULTS` 末尾再加一个
 `;sdkconfig.defaults.esp32c5-lcd-diag`，重新 `set-target` + `build`，产物另存为
@@ -111,9 +122,11 @@ GMT032 模块的背光是 6 颗 LED，工作电流约 **90–95 mA**，远超单
 
 ## 驱动上踩过的坑（改代码前先看）
 
-- **SPI 4 MHz + DMA**：`LCD_SPI_HZ=4000000`、`SPI_DMA_CH_AUTO` 必须成对。这组
-  15 cm 杜邦线上 8 MHz 无 DMA 会丢字节（纯白 / 一根竖线 / GRAM 雪花随机出现）。
-  只降速不换 DMA 也可能不起图。
+- **SPI 8 MHz + DMA**：`LCD_SPI_HZ=8000000` 与 `SPI_DMA_CH_AUTO` 必须成对，
+  还要保留手动 CS 的 2 µs 建立时间。早期 8 MHz **无 DMA** 在这组 15 cm 杜邦线
+  上会丢字节（纯白 / 一根竖线 / GRAM 雪花），当时降到 4 MHz 才稳定。现在 DMA
+  到位后 8 MHz 可用，写屏时间直接减半。若仍花屏，用 `-DLCD_SPI_HZ=4000000`
+  重编，或直接烧 4 MHz 回退镜像。
 - **CS 手动拉**：`spics_io_num=-1`，命令 / 参数 / 像素在同一 CS 窗口内发完，
   前后各留 2 µs 建立时间。
 - **颜色取反**：这块玻璃对 `INVON/INVOFF` 的表现和预期相反，靠命令调不出深色
@@ -135,10 +148,18 @@ GMT032 模块的背光是 6 颗 LED，工作电流约 **90–95 mA**，远超单
   `lcd_pixels_cont()`、最后 `lcd_pixels_end()`，CS 全程保持低。同时把环形缓冲
   索引在帧首冻结（`base = wf_next`），并去掉瀑布绘制途中的 `maybe_acquire()`，
   避免一帧里上半屏旧数据、下半屏新数据。
-- **帧周期 300 ms**：一帧约 134 KB / 4 MHz ≈ 270 ms，旧的 120 ms 周期让
-  `render()` 一返回就开下一帧，屏幕永远没有静止的一刻。SPI 屏没有 VSYNC 和
-  双缓冲，tearing 只能减轻不能根除；采集仍插在频谱阶段、帧首和帧尾，SWEEP
-  的 80 ms 步速不变。
+- **频谱也一次开窗刷完**：原先为了给 80 ms 的 SWEEP 步速让路，把
+  `lcd_draw_bitmap2()` 拆成上下两半、中间插一次采集，正好在曲线中间留下一条
+  水平接缝。8 MHz 下整块只要约 69 ms，已能塞进一个步距，所以改回一次发完，
+  采集移到帧边界。
+- **顶栏节流 500 ms**：LIVE 每次采集都会刷新 PK / ACT / DET 数字，旧脏检查
+  几乎每帧失效，于是 30 行的小填充窗口 + 好几个文字窗口在顶部反复重写，
+  看起来连顶栏都在滚。现在数值类更新最多 2 次/秒，模式 / 频段 / 静音 /
+  信道变化仍立即重画。
+- **帧周期 300 ms**：一帧约 134 KB，4 MHz 时约 270 ms、8 MHz 时约 135 ms；
+  旧的 120 ms 周期让 `render()` 一返回就开下一帧，屏幕永远没有静止的一刻。
+  SPI 屏没有 VSYNC 和双缓冲，tearing 只能减轻不能根除；采集仍插在帧首、
+  各绘图阶段之间和帧尾，SWEEP 的 80 ms 步速不变。
 
 `main/local_ui/st7789.c` 顶部还留着两个接线排错开关：
 

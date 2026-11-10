@@ -57,13 +57,14 @@
 #define PIN_RST LCD_PIN_RST
 #endif
 
-/* Bring-up knobs. The panel test settled this the hard way: 8 MHz without DMA
- * dropped every byte on this wiring (blank white, a lone vertical line, or
- * GRAM snow depending on the boot), while 4 MHz with DMA painted correctly
- * every time. Keep both settings together — raising the clock alone brings the
- * blank screen back. */
+/* Bring-up knobs. 8 MHz without DMA dropped bytes on this wiring (blank white,
+ * a lone vertical line, or GRAM snow); with DMA and the 2 us CS setup time it is
+ * stable and halves the time a full frame spends on the bus — the single biggest
+ * lever against tearing, since the panel has no VSYNC. If the picture turns to
+ * snow, override with -DLCD_SPI_HZ=4000000 (or flash the 4 MHz fallback image).
+ * Keep the DMA channel and the manual CS handling together. */
 #ifndef LCD_SPI_HZ
-#define LCD_SPI_HZ 4000000
+#define LCD_SPI_HZ 8000000
 #endif
 
 /* Visible-area offset inside the controller GRAM. A 240x320 panel needs 0/0,

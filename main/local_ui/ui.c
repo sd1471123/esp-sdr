@@ -106,11 +106,11 @@ static void trace(const char *fmt, ...) { (void)fmt; }
 #define COL_MUTE    0xF800
 
 #define SWEEP_PERIOD_US  80000
-/* A frame moves ~134 KB over the 4 MHz bus (~270 ms). Asking for less than that
- * made render() start the next frame the instant it returned, so the panel never
- * got a still picture and the write seam never stopped moving. 300 ms leaves a
- * short stable window. The RF engine still gets slots inside the frame, so the
- * sweep keeps its 80 ms cadence. */
+/* A frame is ~134 KB: ~270 ms at 4 MHz, ~135 ms at 8 MHz. Asking for less than
+ * the frame time made render() start the next frame the instant it returned, so
+ * the panel never got a still picture and the write seam never stopped moving.
+ * 300 ms leaves a real stable window at either clock. The RF engine still gets
+ * slots at the frame boundaries, so the sweep keeps its 80 ms cadence. */
 #define RENDER_PERIOD_US 300000
 #define HOST_PERIOD_US   500000
 
@@ -509,6 +509,20 @@ static void render_top(unsigned w) {
         top_cache.ch == channel && top_cache.mhz == shown && top_cache.edge == edge0)
         return;
 
+    /* In LIVE the pk/act/det numbers change on every capture, so the cache
+     * above misses almost every frame. Repainting the bar means ~30 one-row
+     * fill windows plus several text windows, all stacked inside the first 30
+     * scanlines — that is what made the top bar look like it was rolling too.
+     * Throttle numeric-only updates; mode/band/mute/channel changes still paint
+     * immediately. */
+    static int64_t last_top_us;
+    int64_t now_us = esp_timer_get_time();
+    bool structural = !top_cache.valid || top_cache.live != live ||
+                      top_cache.muted != muted || top_cache.ch != channel ||
+                      top_cache.mhz != shown || top_cache.edge != edge0;
+    if (!structural && now_us - last_top_us < 500000) return;
+    last_top_us = now_us;
+
     lcd_fill_rect(0, 0, w, top, COL_PANEL);
     lcd_fill_rect(0, top - 1, w, 1, COL_BG);
 
@@ -664,14 +678,13 @@ static void render_spectrum(unsigned w) {
         mask_text(8, 8, lab, 3);
     }
 
-    /* Sent in two halves so the RF engine gets a slot in the middle: this one
-     * call is 120 ms of bus time, longer than the 80 ms sweep step. */
-    unsigned half = h / 2;
-    lcd_draw_bitmap2(0, layout.spec_y, w, half, mask, spec_palette);
+    /* One window, one continuous bitmap. It used to be split into two halves
+     * with a capture slot in between (the call took 120 ms at 4 MHz, longer than
+     * the 80 ms sweep step); that gap left a visible horizontal seam right
+     * through the middle of the trace. At 8 MHz the whole bitmap takes ~69 ms,
+     * so it fits inside a step and the seam is gone. */
     pump_buttons();
-    maybe_acquire();
-    lcd_draw_bitmap2(0, layout.spec_y + half, w, h - half, mask + (size_t)half * stride,
-                     spec_palette);
+    lcd_draw_bitmap2(0, layout.spec_y, w, h, mask, spec_palette);
 }
 
 static void render_waterfall(unsigned w) {

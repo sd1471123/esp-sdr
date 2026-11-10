@@ -1,8 +1,9 @@
 """Merge the esp-sdr image into a single 0x0 flash file."""
 import os
+import sys
 
 BUILD = r"E:\esp32-c5 android\esp-sdr\build"
-OUT = r"E:\esp32-c5 android\esp-sdr\firmware\esp32c5-lcd-full.bin"
+OUT = sys.argv[1] if len(sys.argv) > 1 else r"E:\esp32-c5 android\esp-sdr\firmware\esp32c5-lcd-full.bin"
 
 segments = [
     (0x2000, os.path.join(BUILD, "bootloader", "bootloader.bin")),
