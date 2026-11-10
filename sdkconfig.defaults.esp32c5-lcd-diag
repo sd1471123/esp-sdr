@@ -1,0 +1,5 @@
+# Bring-up only. The host protocol normally runs on UART0 at 2 Mbaud, which is
+# past what the CH340 header reliably samples, so the console and the UI trace
+# are unreadable exactly when they are needed. Drop UART0 to 115200 for a
+# diagnostic build; flash the plain lcd image to restore 2 Mbaud.
+CONFIG_ESP_SDR_UART_BAUD=115200

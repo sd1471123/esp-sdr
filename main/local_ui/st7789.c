@@ -57,12 +57,13 @@
 #define PIN_RST LCD_PIN_RST
 #endif
 
-/* Bring-up knobs. A panel on 15 cm dupont wires rarely survives 40 MHz: the
- * data lines ring and the controller latches shifted pixels, which looks like
- * random colour noise. 20 MHz is the safe default; raise it once the picture
- * is stable. */
+/* Bring-up knobs. The panel test settled this the hard way: 8 MHz without DMA
+ * dropped every byte on this wiring (blank white, a lone vertical line, or
+ * GRAM snow depending on the boot), while 4 MHz with DMA painted correctly
+ * every time. Keep both settings together — raising the clock alone brings the
+ * blank screen back. */
 #ifndef LCD_SPI_HZ
-#define LCD_SPI_HZ 20000000
+#define LCD_SPI_HZ 4000000
 #endif
 
 /* Visible-area offset inside the controller GRAM. A 240x320 panel needs 0/0,
@@ -78,17 +79,59 @@
 /* Paint solid bars and a 1 px frame right after init so a wiring fault can be
  * told apart from a drawing fault. Set to 0 for a silent boot. */
 #ifndef LCD_SELFTEST
-#define LCD_SELFTEST 1
+#define LCD_SELFTEST 0
+#endif
+
+/* Every pixel is inverted in software before it goes out.
+ *
+ * The INVON/INVOFF command is not a reliable switch on this glass: the module
+ * renders the opposite polarity whichever of 0x20/0x21 it was sent, so the
+ * near-black UI came out as a white page and a "dark" background was impossible
+ * to reach by command alone. Inverting the data ourselves is deterministic —
+ * whatever the panel does, the two inversions cancel. Measured on the panel
+ * running 0x21: background was pure white, so the data is inverted here. */
+#ifndef LCD_INVERT_DATA
+#define LCD_INVERT_DATA 1
+#endif
+#if LCD_INVERT_DATA
+#define LCD_PIX(v) ((uint16_t)((v) ^ 0xffffu))
+#else
+#define LCD_PIX(v) ((uint16_t)(v))
 #endif
 
 static spi_device_handle_t lcd_spi;
 static uint16_t *stage;
 static unsigned lcd_w = 320, lcd_h = 240;
 static bool landscape = true;
+static bool cs_low;
 
 static void lcd_selftest(void);
 
+/* CS is driven by hand rather than by the SPI peripheral.
+ *
+ * With the peripheral owning CS, every spi_device_polling_transmit() raises the
+ * line on the way out, so a command and its parameters — and worse, RAMWR and
+ * the pixel stream that follows it — end up in separate CS windows. A panel
+ * that latches on the CS edge simply keeps an empty GRAM in that case, which on
+ * this IPS part means the screen stays uniformly white no matter what is drawn.
+ * Holding CS low across the whole logical transaction costs nothing and removes
+ * the failure mode. */
+static void cs_assert(void) {
+    if (cs_low) return;
+    gpio_set_level(LCD_PIN_CS, 0);
+    esp_rom_delay_us(2);
+    cs_low = true;
+}
+
+static void cs_release(void) {
+    if (!cs_low) return;
+    esp_rom_delay_us(2);
+    gpio_set_level(LCD_PIN_CS, 1);
+    cs_low = false;
+}
+
 static void lcd_cmd(uint8_t cmd, const uint8_t *data, size_t len) {
+    cs_assert();
     gpio_set_level(PIN_DC, 0);
     spi_transaction_t t = {.length = 8, .tx_buffer = &cmd};
     spi_device_polling_transmit(lcd_spi, &t);
@@ -97,6 +140,7 @@ static void lcd_cmd(uint8_t cmd, const uint8_t *data, size_t len) {
         spi_transaction_t d = {.length = len * 8, .tx_buffer = data};
         spi_device_polling_transmit(lcd_spi, &d);
     }
+    cs_release();
 }
 
 static void lcd_cmd1(uint8_t cmd, uint8_t value) { lcd_cmd(cmd, &value, 1); }
@@ -114,7 +158,8 @@ bool lcd_init(void) {
     if (!stage) return false;
 
     const gpio_config_t out = {
-        .pin_bit_mask = UI_PIN_MASK(PIN_DC) | UI_PIN_MASK(PIN_RST) | UI_PIN_MASK(LCD_PIN_BL),
+        .pin_bit_mask = UI_PIN_MASK(PIN_DC) | UI_PIN_MASK(PIN_RST) | UI_PIN_MASK(LCD_PIN_CS) |
+                        UI_PIN_MASK(LCD_PIN_BL),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -122,6 +167,7 @@ bool lcd_init(void) {
     };
     gpio_config(&out);
     gpio_set_level(LCD_PIN_BL, 0);
+    gpio_set_level(LCD_PIN_CS, 1);
     gpio_set_level(PIN_DC, 1);
     gpio_set_level(PIN_RST, 1);
 
@@ -133,12 +179,12 @@ bool lcd_init(void) {
         .quadhd_io_num = -1,
         .max_transfer_sz = STAGE_PIXELS * 2,
     };
-    if (spi_bus_initialize(LCD_SPI_HOST, &bus, SPI_DMA_DISABLED) != ESP_OK) return false;
+    if (spi_bus_initialize(LCD_SPI_HOST, &bus, SPI_DMA_CH_AUTO) != ESP_OK) return false;
 
     spi_device_interface_config_t dev = {
         .clock_speed_hz = LCD_SPI_HZ,
         .mode = 0,
-        .spics_io_num = LCD_PIN_CS,
+        .spics_io_num = -1, /* CS handled by hand; see cs_assert() */
         .queue_size = 1,
     };
     if (spi_bus_add_device(LCD_SPI_HOST, &dev, &lcd_spi) != ESP_OK) return false;
@@ -195,32 +241,49 @@ bool lcd_init(void) {
     lcd_cmd(0x29, NULL, 0); /* display on */
     esp_rom_delay_us(20000);
 #else
-    lcd_cmd1(0x01, 0x00); /* software reset */
-    esp_rom_delay_us(150000);
-    lcd_cmd1(0x11, 0x00); /* sleep out */
-    esp_rom_delay_us(120000);
-    lcd_cmd1(0x3a, 0x55); /* 16-bit RGB565 */
+    /* Vendor sequence for the GMT320-8P module, taken from the C51 demo the
+     * seller ships (TFT_init() in main.c). Two things there matter:
+     *   - the last display-mode command is 0x20 (inversion OFF). With 0x21 the
+     *     dark UI came out as a white page with dark hairlines, which is what
+     *     "a pile of brackets and little dashes" actually was.
+     *   - the power/gamma table is tuned for this panel; the generic ST7789
+     *     values give washed-out contrast.
+     * MADCTL is the one value we keep under our control so the UI can rotate. */
+    lcd_cmd1(0x3a, 0x05); /* 16 bpp RGB565, as the demo sends it */
     lcd_cmd1(0x36, landscape ? LCD_MADCTL_LAND : LCD_MADCTL_PORT);
-    const uint8_t porctrl[] = {0x0c, 0x0c, 0x00, 0x33, 0x33};
-    lcd_cmd(0xb2, porctrl, sizeof(porctrl));
-    lcd_cmd1(0xb7, 0x35);
-    lcd_cmd1(0xbb, 0x1f);
-    lcd_cmd1(0xc0, 0x2c);
-    lcd_cmd1(0xc2, 0x01);
-    lcd_cmd1(0xc3, 0x13);
-    lcd_cmd1(0xc4, 0x20);
-    lcd_cmd1(0xc6, 0x0f);
+    lcd_cmd1(0xc5, 0x1a); /* VCOM */
+
+    const uint8_t porctrl[] = {0x05, 0x05, 0x00, 0x33, 0x33};
+    lcd_cmd(0xb2, porctrl, sizeof(porctrl)); /* porch setting */
+    lcd_cmd1(0xb7, 0x05);                    /* gate control, 12.2 V / -10.43 V */
+    lcd_cmd1(0xbb, 0x3f);                    /* VCOM */
+    lcd_cmd1(0xc0, 0x2c);                    /* power control */
+    lcd_cmd1(0xc2, 0x01);                    /* VDV/VRH enable */
+    lcd_cmd1(0xc3, 0x0f);                    /* VRH */
+    lcd_cmd1(0xc4, 0x20);                    /* VDV */
+    lcd_cmd1(0xc6, 0x01);                    /* frame rate 111 Hz */
     const uint8_t pwctrl[] = {0xa4, 0xa1};
     lcd_cmd(0xd0, pwctrl, sizeof(pwctrl));
-    const uint8_t gamma_pos[] = {0xd0, 0x08, 0x11, 0x08, 0x0c, 0x15, 0x39, 0x33,
-                                 0x50, 0x36, 0x13, 0x14, 0x29, 0x2d};
+    lcd_cmd1(0xe8, 0x03);
+    const uint8_t eqtime[] = {0x09, 0x09, 0x08};
+    lcd_cmd(0xe9, eqtime, sizeof(eqtime));
+
+    const uint8_t gamma_pos[] = {0xd0, 0x05, 0x09, 0x09, 0x08, 0x14, 0x28,
+                                 0x33, 0x3f, 0x07, 0x13, 0x14, 0x28, 0x30};
     lcd_cmd(0xe0, gamma_pos, sizeof(gamma_pos));
-    const uint8_t gamma_neg[] = {0xd0, 0x08, 0x10, 0x08, 0x06, 0x06, 0x39, 0x44,
-                                 0x51, 0x0b, 0x16, 0x14, 0x2f, 0x31};
+    const uint8_t gamma_neg[] = {0xd0, 0x05, 0x09, 0x09, 0x08, 0x03, 0x24,
+                                 0x32, 0x32, 0x3b, 0x14, 0x13, 0x28, 0x2f};
     lcd_cmd(0xe1, gamma_neg, sizeof(gamma_neg));
-    lcd_cmd1(0x21, 0x00); /* inversion on */
-    lcd_cmd1(0x13, 0x00); /* normal display */
-    lcd_cmd1(0x29, 0x00); /* display on */
+
+    /* This IPS panel is normally white: leaving inversion off makes every dark
+     * colour read as its inverse, so the near-black UI came out pale grey with
+     * dark text. 0x21 cancels the panel's own inversion and gives back the
+     * intended colours. (The vendor C51 demo ends with 0x20 because its own
+     * palette is already inverted.) */
+    lcd_cmd(0x21, NULL, 0); /* inversion on */
+    lcd_cmd(0x11, NULL, 0); /* sleep out */
+    esp_rom_delay_us(120000);
+    lcd_cmd(0x29, NULL, 0); /* display on */
     esp_rom_delay_us(20000);
 #endif
     gpio_set_level(LCD_PIN_BL, 1);
@@ -259,14 +322,22 @@ void lcd_set_window(unsigned x, unsigned y, unsigned w, unsigned h) {
     uint8_t rows[] = {y >> 8, y, y1 >> 8, y1};
     lcd_cmd(0x2a, cols, 4);
     lcd_cmd(0x2b, rows, 4);
-    lcd_cmd(0x2c, NULL, 0);
+
+    /* RAMWR deliberately leaves CS asserted: the pixel stream that follows must
+     * live in the same window, and lcd_pixels()/lcd_fill_rect() release it. */
+    cs_assert();
+    gpio_set_level(PIN_DC, 0);
+    uint8_t ramwr = 0x2c;
+    spi_transaction_t t = {.length = 8, .tx_buffer = &ramwr};
+    spi_device_polling_transmit(lcd_spi, &t);
+    gpio_set_level(PIN_DC, 1);
 }
 
 void lcd_pixels(const uint16_t *pixels, unsigned count) {
     while (count) {
         unsigned chunk = count > STAGE_PIXELS ? STAGE_PIXELS : count;
         for (unsigned j = 0; j < chunk; j++) {
-            uint16_t v = pixels[j];
+            uint16_t v = LCD_PIX(pixels[j]);
             stage[j] = (uint16_t)((v >> 8) | (v << 8));
         }
         gpio_set_level(PIN_DC, 1);
@@ -275,12 +346,14 @@ void lcd_pixels(const uint16_t *pixels, unsigned count) {
         pixels += chunk;
         count -= chunk;
     }
+    cs_release();
 }
 
 void lcd_fill_rect(unsigned x, unsigned y, unsigned w, unsigned h, uint16_t color) {
     if (!w || !h) return;
     lcd_set_window(x, y, w, h);
-    uint16_t swapped = (uint16_t)((color >> 8) | (color << 8));
+    uint16_t solid = LCD_PIX(color);
+    uint16_t swapped = (uint16_t)((solid >> 8) | (solid << 8));
     for (unsigned j = 0; j < STAGE_PIXELS; j++) stage[j] = swapped;
     unsigned total = w * h;
     gpio_set_level(PIN_DC, 1);
@@ -290,6 +363,7 @@ void lcd_fill_rect(unsigned x, unsigned y, unsigned w, unsigned h, uint16_t colo
         spi_device_polling_transmit(lcd_spi, &t);
         total -= chunk;
     }
+    cs_release();
 }
 
 void lcd_fill(uint16_t color) { lcd_fill_rect(0, 0, lcd_w, lcd_h, color); }
@@ -304,11 +378,13 @@ void lcd_draw_bitmap2(unsigned x, unsigned y, unsigned w, unsigned h, const uint
         for (unsigned col = 0; col < w; col++) {
             unsigned shift = 6 - 2 * (col & 3);
             unsigned idx = (src[col >> 2] >> shift) & 3;
-            stage[col] = (uint16_t)((palette[idx] >> 8) | (palette[idx] << 8));
+            uint16_t c = LCD_PIX(palette[idx]);
+            stage[col] = (uint16_t)((c >> 8) | (c << 8));
         }
         spi_transaction_t t = {.length = w * 16, .tx_buffer = stage};
         spi_device_polling_transmit(lcd_spi, &t);
     }
+    cs_release();
 }
 
 #if LCD_SELFTEST
@@ -320,7 +396,7 @@ static void lcd_selftest(void) {
     static const uint16_t bars[] = {0xf800, 0x07e0, 0x001f, 0xffff, 0x0000};
     for (unsigned i = 0; i < sizeof(bars) / sizeof(bars[0]); i++) {
         lcd_fill(bars[i]);
-        esp_rom_delay_us(250000);
+        esp_rom_delay_us(500000);
     }
     lcd_fill(0x0000);
     lcd_fill_rect(0, 0, lcd_w, 1, 0xffff);

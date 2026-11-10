@@ -16,27 +16,32 @@
 
 #include "board_c5_lcd.h"
 #include "driver/gpio.h"
-#include "driver/usb_serial_jtag.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
 
 /* Header pins only. 15-22 are the in-package memory pads, 11/12 stay with the
- * console, and 25 is the buzzer we talk through. */
-static const int probe_pins[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14, 23, 24, 26, 27, 28};
+ * console, and 25 is the buzzer we talk through. 13/14 are USB D-/D+: while a
+ * cable is plugged in the host holds D- low, so they always look "stuck" and
+ * grounding them fights the PHY. They are the two pins the panel wiring should
+ * never use anyway. */
+static const int probe_pins[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 23, 24, 26, 27, 28};
 #define PROBE_COUNT (sizeof(probe_pins) / sizeof(probe_pins[0]))
 
-static bool console_ready;
-
+/* Text goes to stdout, which the project points at whichever console it was
+ * built with: UART0 on the probe image, USB-Serial-JTAG on the panel image.
+ * printf is used rather than a private driver because installing the
+ * usb_serial_jtag driver while the console already owns that peripheral
+ * deadlocks the task before a single byte leaves the chip. */
 static void say(const char *text) {
-    if (console_ready) usb_serial_jtag_write_bytes(text, strlen(text), pdMS_TO_TICKS(20));
+    esp_rom_printf("%s", text);
 }
 
 static void say_pin(int pin, const char *suffix) {
     char line[32];
-    int n = snprintf(line, sizeof(line), "PIN %d %s\n", pin, suffix);
-    if (console_ready && n > 0) usb_serial_jtag_write_bytes(line, (size_t)n, pdMS_TO_TICKS(20));
+    if (snprintf(line, sizeof(line), "PIN %d %s\n", pin, suffix) > 0) say(line);
 }
 
 static void note(int ms) {
@@ -79,6 +84,8 @@ static void alive(void) {
 }
 
 void pin_probe_run(void) {
+    say("PROBE boot\n");
+
     const gpio_config_t out = {
         .pin_bit_mask = UI_PIN_MASK(BUZZER_PIN),
         .mode = GPIO_MODE_OUTPUT,
@@ -100,25 +107,43 @@ void pin_probe_run(void) {
         gpio_config(&in);
     }
 
-    usb_serial_jtag_driver_config_t usb = {.tx_buffer_size = 256, .rx_buffer_size = 256};
-    console_ready = usb_serial_jtag_driver_install(&usb) == ESP_OK;
     say("PROBE ready, touch a header pin to GND\n");
 
     rest(400);
     alive();
 
-    /* Anything already low at boot is shorted, not pressed: report it first. */
-    int stuck[PROBE_COUNT];
+    /* One line with every pin and its level: 'L' means something is holding it
+     * down before any key was pressed. */
+    say("PROBE levels:");
+    for (size_t j = 0; j < PROBE_COUNT; j++) {
+        char item[10];
+        snprintf(item, sizeof(item), " %d%c", probe_pins[j],
+                 gpio_get_level(probe_pins[j]) ? 'H' : 'L');
+        say(item);
+    }
+    say("\n");
+
+    /* Anything already low at boot is shorted, not pressed: report it once, in
+     * text and in beeps, then leave it out of the loop. A permanently grounded
+     * pin would otherwise sit in the release wait below and mute the probe. */
+    bool stuck[PROBE_COUNT] = {false};
     size_t stuck_count = 0;
-    for (size_t j = 0; j < PROBE_COUNT; j++)
-        if (gpio_get_level(probe_pins[j]) == 0) stuck[stuck_count++] = probe_pins[j];
+    for (size_t j = 0; j < PROBE_COUNT; j++) {
+        if (gpio_get_level(probe_pins[j]) != 0) continue;
+        stuck[j] = true;
+        stuck_count++;
+        say_pin(probe_pins[j], "low at boot");
+    }
     if (stuck_count) {
         say("PROBE stuck low at boot\n");
-        for (size_t j = 0; j < stuck_count; j++) announce(stuck[j]);
+        for (size_t j = 0; j < PROBE_COUNT; j++)
+            if (stuck[j]) announce(probe_pins[j]);
+        say("PROBE listening, the pins above are ignored\n");
     }
 
     for (;;) {
         for (size_t j = 0; j < PROBE_COUNT; j++) {
+            if (stuck[j]) continue;
             int pin = probe_pins[j];
             if (gpio_get_level(pin) != 0) continue;
             rest(25); /* debounce */

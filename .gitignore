@@ -33,3 +33,6 @@ Thumbs.db
 
 # CI SDK checkout
 /.esp-idf/
+
+# Standalone panel-test project lives outside this repo
+/firmware/esp32c5-lcd-test.bin

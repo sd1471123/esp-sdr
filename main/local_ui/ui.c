@@ -12,26 +12,84 @@
 #include "buzzer.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "driver/uart.h"
+#include "sdkconfig.h"
+#include <stdarg.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
+/* Bring-up trace. The panel image puts its console on the USB-Serial-JTAG
+ * port, which is exactly the port that goes away when a wiring experiment
+ * pulls the USB pins low, so the trace is written straight to UART0 instead:
+ * the CH340 header is always readable.
+ *
+ * The diagnostic build drops the host UART to 115200 (see
+ * sdkconfig.defaults.esp32c5-lcd-diag), so it gets the trace for free. A
+ * normal build runs the burst protocol on UART0 at 2 Mbaud: printing UI text
+ * there would corrupt the host stream, so the trace is off. Override with
+ * -DUI_TRACE=1 if a debug session needs it anyway. */
+#ifndef UI_TRACE
+#if CONFIG_ESP_SDR_UART_BAUD <= 115200
+#define UI_TRACE 1
+#else
+#define UI_TRACE 0
+#endif
+#endif
+
+#if UI_TRACE
+static void trace(const char *fmt, ...) {
+    static bool started;
+    if (!started) {
+        const uart_config_t cfg = {
+            .baud_rate = 115200, .data_bits = UART_DATA_8_BITS,
+            .parity = UART_PARITY_DISABLE, .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, .source_clk = UART_SCLK_DEFAULT,
+        };
+        /* burst_serial_init() usually owns UART0 already. Take it over when it
+         * is free, but never bail out: if the install fails the driver is live
+         * at the configured host baud and the write below still lands. */
+        if (uart_driver_install(UART_NUM_0, 512, 1024, 0, NULL, 0) == ESP_OK) {
+            uart_param_config(UART_NUM_0, &cfg);
+            uart_set_pin(UART_NUM_0, 11, 12, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        }
+        started = true;
+    }
+    char line[128];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n > 0) uart_write_bytes(UART_NUM_0, line, (size_t)n);
+}
+#else
+static void trace(const char *fmt, ...) { (void)fmt; }
+#endif
+
 #define FFT_BINS      256
 #define RATE_CODE     2 /* 20 MS/s */
 #define RATE_SWEEP    0 /* 80 MS/s, same capture width as the phone app */
 #define WF_STRIDE     320
-#define WF_ROWS_MAX   120
+/* Rows of history kept for the waterfall. 120 rows cost 75 KB of internal
+ * RAM, which on this build left 6 KB and made xTaskCreate() fail outright —
+ * the panel then never drew and the keys were never polled. 64 rows still
+ * covers the visible 62 px strip. */
+#define WF_ROWS_MAX   64
 #define MASK_BYTES    (320 * 140 / 4)
 #define TEXT_PIXELS   (320 * 12)
 
-/* Palette taken from the approved panel design (dark navy + cyan + amber). */
-#define COL_BG      0x0862 /* #070b0f */
-#define COL_SPEC_BG 0x0862 /* #080c11 */
-#define COL_PANEL   0x10A3 /* #11161d */
-#define COL_STRIP   0x0882 /* #0c1117 */
-#define COL_GRID    0x18E4 /* rgba(255,255,255,.065) on spec bg */
+/* Palette taken from the approved panel design (dark navy + cyan + amber).
+ * The drawing areas are pure black: an IPS panel's black level is the floor of
+ * the whole picture, so anything above 0x0000 reads as "washed out grey" once
+ * the backlight is at full brightness. Only the status bar and the channel
+ * strip keep a single 5-6-5 step of lift so their edges stay visible. */
+#define COL_BG      0x0000 /* #000000 */
+#define COL_SPEC_BG 0x0000 /* #000000 */
+#define COL_PANEL   0x0862 /* #080c10 — one step above black */
+#define COL_STRIP   0x0862 /* #080c10 */
+#define COL_GRID    0x10A3 /* faint grid on black */
 #define COL_DIM     0x5B2E /* #5c6675 */
 #define COL_MUTED   0xBE1A /* #b9c3d3 */
 #define COL_TEXT    0xE75D /* #e8edf4 */
@@ -44,12 +102,15 @@
 #define COL_TINT_C  0x0967 /* cyan 16% on strip bg */
 #define COL_TINT_O  0x2924 /* amber 12% on panel */
 #define COL_TINT_G  0x1A25 /* green 12% on panel */
-#define COL_FILL    0x5A44 /* amber-brown area under the peak, like the phone app */
+#define COL_FILL    0x1081 /* dark amber wash under the peak — must stay near black */
 #define COL_USB     0x07FF
 #define COL_MUTE    0xF800
 
 #define SWEEP_PERIOD_US  80000
-#define RENDER_PERIOD_US 100000
+/* A full 320x240 repaint is 153 KB, which takes ~0.31 s at 4 MHz, so asking for
+ * 10 fps only made the panel chase the renderer and the picture crawled down
+ * the screen. Match the period to what the bus can actually deliver. */
+#define RENDER_PERIOD_US 120000
 #define HOST_PERIOD_US   500000
 
 typedef struct {
@@ -100,15 +161,55 @@ static uint8_t col_seen[40];        /* bitmap: band column covered by this sweep
 /* Vertical scale, as in the phone app: a 70 dB window anchored on the noise floor
  * (floor + 55) or on the strongest peak, attack 0.4 / release 0.06 per capture. */
 static int view_top_db = -30, view_bot_db = -100;
+/* Noise floor the auto-range settled on, published for the diagnostics line. */
+static int floor_db_seen = -84;
 static bool manual_range;
 
 
 /* Band plans copied from the phone app (Bands.range / channels20). */
-static unsigned band_lo(void) { return cfg.band == UI_BAND_5G ? 5150 : 2400; }
-static unsigned band_hi(void) { return cfg.band == UI_BAND_5G ? 5895 : 2500; }
-static unsigned band_count(void) { return cfg.band == UI_BAND_5G ? 36 : 13; }
-static unsigned band_number(unsigned idx) { return cfg.band == UI_BAND_5G ? 36 + idx * 4 : idx + 1; }
-static unsigned band_mhz(unsigned idx) { return cfg.band == UI_BAND_5G ? 5180 + idx * 20 : 2412 + idx * 5; }
+/* The axis spans exactly the 20 MHz blocks of the first and last channel, so a
+ * channel's block always starts at column 0 and ends at column w. The old 5 GHz
+ * range started at 5150 while ch36's block starts at 5170, which left ~12 px of
+ * dead space on the left of the strip but none on the right: the bars looked
+ * flush right and short left. 2400/2500 did the same thing to 2.4 GHz, worse at
+ * the right edge (ch13 ends at 2482). */
+static unsigned band_lo(void) { return cfg.band == UI_BAND_5G ? 5170 : 2402; }
+static unsigned band_hi(void) { return cfg.band == UI_BAND_5G ? 5895 : 2482; }
+
+/* Standard 20 MHz channel table (IEEE 802.11), the same one the panel design
+ * uses. The 5 GHz numbering is *not* a uniform 20 MHz grid: ch64 ends at 5320
+ * and the next usable centre is 5480 (ch96), and UNII-3 sits on half-steps
+ * (ch149 = 5745, not 5740). Deriving the number as 36 + idx * 4 therefore
+ * invented channels 68…92 and 148…176 that do not exist, which is what the
+ * strip was showing. Look the number up instead of computing it. */
+typedef struct {
+    uint8_t num;
+    uint16_t mhz;
+} chan_t;
+
+static const chan_t k_ch24[] = {
+    {1, 2412},  {2, 2417},  {3, 2422},  {4, 2427},  {5, 2432},  {6, 2437}, {7, 2442},
+    {8, 2447},  {9, 2452},  {10, 2457}, {11, 2462}, {12, 2467}, {13, 2472},
+};
+static const chan_t k_ch5g[] = {
+    {36, 5180},  {40, 5200},  {44, 5220},  {48, 5240},
+    {52, 5260},  {56, 5280},  {60, 5300},  {64, 5320},
+    {96, 5480}, /* UNII-2C lower edge: legal IEEE channel, almost never enabled */
+    {100, 5500}, {104, 5520}, {108, 5540}, {112, 5560}, {116, 5580},
+    {120, 5600}, {124, 5620}, {128, 5640}, {132, 5660}, {136, 5680},
+    {140, 5700}, {144, 5720},
+    {149, 5745}, {153, 5765}, {157, 5785}, {161, 5805}, {165, 5825},
+    {169, 5845}, {173, 5865}, {177, 5885},
+};
+#define CH24_COUNT (sizeof(k_ch24) / sizeof(k_ch24[0]))
+#define CH5G_COUNT (sizeof(k_ch5g) / sizeof(k_ch5g[0]))
+
+static const chan_t *band_tab(void) { return cfg.band == UI_BAND_5G ? k_ch5g : k_ch24; }
+static unsigned band_count(void) { return cfg.band == UI_BAND_5G ? CH5G_COUNT : CH24_COUNT; }
+static unsigned band_number(unsigned idx) {
+    return idx < band_count() ? band_tab()[idx].num : 0;
+}
+static unsigned band_mhz(unsigned idx) { return idx < band_count() ? band_tab()[idx].mhz : 0; }
 
 /* The sweep steps its LO every 20 MHz from band start - 10 to band end + 10. */
 static unsigned sweep_steps(void) { return (band_hi() + 10 - (band_lo() - 10)) / 20 + 1; }
@@ -186,6 +287,7 @@ static void update_view_scale(void) {
         hist[j] = v;
     }
     int floor_db = hist[n / 5];
+    floor_db_seen = floor_db;
     int target = floor_db + 55;
     int peak_db_c = (int)strongest / 2 - 84;
     if (peak_db_c > target - 8) target = peak_db_c + 8;
@@ -241,6 +343,33 @@ static inline void mask_put(unsigned x, unsigned y, unsigned value) {
     uint8_t *p = &mask[y * stride + (x >> 2)];
     unsigned shift = 6 - 2 * (x & 3);
     *p = (uint8_t)((*p & ~(3u << shift)) | ((value & 3u) << shift));
+}
+
+/* Text drawn *into* the bitmap instead of on top of it.
+ *
+ * Anything painted over the spectrum with ui_text() was erased again by the
+ * next frame's bitmap pass and only came back at the very end of it, so labels
+ * and the callout blinked at frame rate. Composing them into the mask means the
+ * whole region is written exactly once per frame and nothing disappears. */
+static void mask_text(unsigned x, unsigned y, const char *s, unsigned idx) {
+    unsigned sw = lcd_width();
+    unsigned n = (unsigned)strlen(s), cw = FONT5X7_W + 1;
+    for (unsigned row = 0; row < FONT5X7_H; row++) {
+        for (unsigned i = 0; i < n; i++) {
+            unsigned ch = (unsigned char)s[i];
+            unsigned bits = (ch >= 32 && ch < 127) ? font5x7[ch - 32][row] : 0;
+            for (unsigned col = 0; col < FONT5X7_W; col++) {
+                if (!((bits >> col) & 1)) continue;
+                unsigned px = x + i * cw + col;
+                if (px < sw) mask_put(px, y + row, idx);
+            }
+        }
+    }
+}
+
+static void mask_rect(unsigned x, unsigned y, unsigned w, unsigned h, unsigned idx) {
+    for (unsigned dy = 0; dy < h; dy++)
+        for (unsigned dx = 0; dx < w; dx++) mask_put(x + dx, y + dy, idx);
 }
 
 static int level_of(unsigned code, unsigned h) {
@@ -306,16 +435,77 @@ static unsigned text_w_big(const char *s) {
     return s[0] ? (unsigned)strlen(s) * (FONT7X12_W + 1) - 1 : 0;
 }
 
+/* Keys are sampled from inside the renderer as well as from the main loop.
+ * A full repaint occupies the task for ~0.3 s, and a key that goes down and up
+ * inside that window was never sampled at all — which is why only a *held* key
+ * ever registered. Every drawing stage pumps this accumulator, so the worst
+ * case latency is one waterfall band instead of one whole frame. */
+static ui_button_event_t ev_acc;
+
+static void pump_buttons(void) {
+    ui_button_event_t e;
+    buttons_poll(&e);
+    ev_acc.short_press |= e.short_press;
+    ev_acc.repeat |= e.repeat;
+    ev_acc.long_press |= e.long_press;
+    if (e.chord_mute) ev_acc.chord_mute = true;
+    if (e.short_press & ((1u << UI_BTN_LEFT) | (1u << UI_BTN_RIGHT))) ev_acc.dir_mod = e.dir_mod;
+}
+
+static struct {
+    bool valid;
+    bool live, muted;
+    int dpk, dact, ddet;
+    unsigned ch, mhz;
+    uint16_t edge;
+} top_cache;
+
+static void acquire(void);
+static int64_t last_acq_us;
+
+/* Acquisition is serviced from inside the renderer.
+ *
+ * The panel is slow: one full repaint moves ~250 KB over a 4 MHz bus, i.e. a
+ * quarter of a second. When the sweep was only stepped at the top of the UI
+ * loop, that quarter second became the step time and a 39-step 5G pass took
+ * ten seconds instead of three. Every drawing stage now offers the RF engine a
+ * slot, so a pass keeps its nominal 80 ms cadence and the picture simply takes
+ * as long as it takes. */
+static void maybe_acquire(void) {
+    if (usb_active) return;
+    int64_t now = esp_timer_get_time();
+    if (now - last_acq_us < SWEEP_PERIOD_US) return;
+    last_acq_us = now;
+    acquire();
+}
+
 static void render_top(unsigned w) {
     unsigned top = layout.top_h;
     unsigned ty = (top - FONT7X12_H) / 2;
+    /* The status bar only changes when a number does, but repainting it every
+     * frame blanked and refilled 30 rows, which reads as a flash along the top
+     * edge. Keep the last painted state and skip the whole band when nothing
+     * moved. */
+    bool live = cfg.mode == UI_MODE_LIVE;
+    int dpk = pk_db, dact = act_db, ddet = det_pct;
+    if (cfg.mode == UI_MODE_SWEEP && ((ch_seen >> channel) & 1u)) {
+        dpk = ch_pk_db[channel];
+        dact = ch_act_db[channel];
+        ddet = ch_det[channel];
+    }
+    unsigned shown = usb_active ? sdr_ui_frequency() : band_mhz(channel);
+    uint16_t edge0 = live ? COL_GREEN : COL_PEAK;
+    if (top_cache.valid && top_cache.live == live && top_cache.muted == muted &&
+        top_cache.dpk == dpk && top_cache.dact == dact && top_cache.ddet == ddet &&
+        top_cache.ch == channel && top_cache.mhz == shown && top_cache.edge == edge0)
+        return;
+
     lcd_fill_rect(0, 0, w, top, COL_PANEL);
     lcd_fill_rect(0, top - 1, w, 1, COL_BG);
 
     const char *band = cfg.band == UI_BAND_5G ? "5G" : "2.4G";
     ui_text(4, ty, band, COL_TEXT, COL_PANEL, true);
 
-    bool live = cfg.mode == UI_MODE_LIVE;
     uint16_t tint = live ? COL_TINT_G : COL_TINT_O;
     uint16_t edge = live ? COL_GREEN : COL_PEAK;
     unsigned bx = 4 + text_w_big(band) + 5;
@@ -325,12 +515,6 @@ static void render_top(unsigned w) {
     const char *mode = live ? "LIVE" : "SWEEP";
     ui_text(bx + (bw - text_w_big(mode)) / 2, ty, mode, edge, tint, true);
 
-    int dpk = pk_db, dact = act_db, ddet = det_pct;
-    if (cfg.mode == UI_MODE_SWEEP && ((ch_seen >> channel) & 1u)) {
-        dpk = ch_pk_db[channel];
-        dact = ch_act_db[channel];
-        ddet = ch_det[channel];
-    }
     char line[40];
     if (w >= 300)
         snprintf(line, sizeof(line), "PK%d A%d D%d%%", dpk, dact, ddet);
@@ -338,7 +522,6 @@ static void render_top(unsigned w) {
         snprintf(line, sizeof(line), "P%d D%d%%", dpk, ddet);
     ui_text(bx + bw + 6, ty, line, COL_MUTED, COL_PANEL, true);
 
-    unsigned shown = usb_active ? sdr_ui_frequency() : band_mhz(channel);
     if (w >= 300)
         snprintf(line, sizeof(line), "ch%u %uM", band_number(channel), shown);
     else
@@ -347,13 +530,26 @@ static void render_top(unsigned w) {
     unsigned tx = (w > 4 + tw) ? w - 4 - tw : 0;
     ui_text(tx, ty, line, COL_TEXT, COL_PANEL, true);
     if (muted) draw_mute_icon(tx > 12 ? tx - 6 : w - 2, top / 2);
+
+    top_cache.valid = true;
+    top_cache.live = live;
+    top_cache.muted = muted;
+    top_cache.dpk = dpk;
+    top_cache.dact = dact;
+    top_cache.ddet = ddet;
+    top_cache.ch = channel;
+    top_cache.mhz = shown;
+    top_cache.edge = edge0;
 }
 
 
 static void render_spectrum(unsigned w) {
     unsigned h = layout.spec_h;
     unsigned stride = (w + 3) / 4;
-    lcd_fill_rect(0, layout.spec_y, w, h, COL_SPEC_BG);
+    /* No background fill first: the bitmap below covers every pixel of the
+     * region (index 0 is the background colour), and clearing before painting
+     * is exactly what made the curve blink once per frame — the area was
+     * blanked, then repainted row by row over ~120 ms. */
     memset(mask, 0, stride * h);
 
     int range = view_top_db - view_bot_db;
@@ -388,15 +584,13 @@ static void render_spectrum(unsigned w) {
             mask_put(x, (unsigned)ph, 3);
         }
     }
-    lcd_draw_bitmap2(0, layout.spec_y, w, h, mask, spec_palette);
-
     char line[32];
     for (int db = -140; db <= 20; db += 20) {
         if (db < view_bot_db || db > view_top_db) continue;
         int y = (int)h - (db - view_bot_db) * (int)h / range;
         if (y <= 9 || y >= (int)h - 11) continue;
         snprintf(line, sizeof(line), "%d", db);
-        ui_text(3, layout.spec_y + (unsigned)y - FONT5X7_H - 1, line, COL_DIM, COL_SPEC_BG, false);
+        mask_text(3, (unsigned)y - FONT5X7_H - 1, line, 1);
     }
 
     unsigned shown = usb_active ? sdr_ui_frequency() : band_mhz(channel);
@@ -406,18 +600,18 @@ static void render_spectrum(unsigned w) {
         hi_mhz = band_hi();
     }
     snprintf(line, sizeof(line), "%u", lo_mhz);
-    ui_text(4, layout.spec_y + h - FONT5X7_H - 3, line, COL_DIM, COL_SPEC_BG, false);
+    mask_text(4, h - FONT5X7_H - 3, line, 1);
     snprintf(line, sizeof(line), "%u", hi_mhz);
     unsigned tw = text_w(line);
-    ui_text(w - 4 - tw, layout.spec_y + h - FONT5X7_H - 3, line, COL_DIM, COL_SPEC_BG, false);
+    mask_text(w - 4 - tw, h - FONT5X7_H - 3, line, 1);
 
     if (cfg.mode == UI_MODE_LIVE) {
         unsigned cx = w / 2;
         for (unsigned y = 0; y < h; y += 5) {
             unsigned seg = h - y < 3 ? h - y : 3;
-            lcd_fill_rect(cx, layout.spec_y + y, 1, seg, COL_GLOW);
+            mask_rect(cx, y, 1, seg, 2);
         }
-        ui_text(4, layout.spec_y + 4, "LIVE 20M", COL_GLOW, COL_SPEC_BG, false);
+        mask_text(4, 4, "LIVE 20M", 2);
     } else {
         char lab[40];
         int cdet = ((ch_seen >> channel) & 1u) ? ch_det[channel] : det_pct;
@@ -427,18 +621,38 @@ static void render_spectrum(unsigned w) {
         else
             snprintf(lab, sizeof(lab), "ch%u %uM  %d%%", band_number(channel), shown, cdet);
         unsigned lw = text_w(lab) + 10;
-        fill_round_rect(3, layout.spec_y + 5, lw, 13, 3, 0x08A3);
-        round_rect_border(3, layout.spec_y + 5, lw, 13, 3, COL_ACCENT);
-        ui_text(8, layout.spec_y + 8, lab, 0xDFBF, 0x08A3, false);
+        /* Box, border and text all live in the bitmap: index 0 clears the graph
+         * underneath, 1 draws the frame, 3 the amber legend. */
+        mask_rect(3, 5, lw, 13, 0);
+        mask_rect(3, 5, lw, 1, 1);
+        mask_rect(3, 17, lw, 1, 1);
+        mask_rect(3, 5, 1, 13, 1);
+        mask_rect(lw + 2, 5, 1, 13, 1);
+        mask_text(8, 8, lab, 3);
     }
+
+    /* Sent in two halves so the RF engine gets a slot in the middle: this one
+     * call is 120 ms of bus time, longer than the 80 ms sweep step. */
+    unsigned half = h / 2;
+    lcd_draw_bitmap2(0, layout.spec_y, w, half, mask, spec_palette);
+    pump_buttons();
+    maybe_acquire();
+    lcd_draw_bitmap2(0, layout.spec_y + half, w, h - half, mask + (size_t)half * stride,
+                     spec_palette);
 }
 
 static void render_waterfall(unsigned w) {
     unsigned rows = layout.wf_h;
+    if (!rows) return;
+    /* Stretch the fixed-depth ring over the layout height instead of indexing
+     * the ring by it. Nearest neighbour is fine: at most two screen rows share
+     * a history row. */
     int range = view_top_db - view_bot_db;
     if (range < 5) range = 5;
     for (unsigned r = 0; r < rows; r++) {
-        const uint8_t *src = wf + ((wf_next + r) % rows) * WF_STRIDE;
+        unsigned src_r = rows > WF_ROWS_MAX ? r * WF_ROWS_MAX / rows : r;
+        if (src_r >= WF_ROWS_MAX) src_r = WF_ROWS_MAX - 1;
+        const uint8_t *src = wf + ((wf_next + src_r) % WF_ROWS_MAX) * WF_STRIDE;
         for (unsigned x = 0; x < w; x++) {
             int db = (int)(src[x] / 2) - 84;
             int idx = (db - view_bot_db) * 255 / range;
@@ -448,67 +662,192 @@ static void render_waterfall(unsigned w) {
         }
         lcd_set_window(0, layout.wf_y + r, w, 1);
         lcd_pixels(wf_line, w);
+        if ((r & 7) == 7) pump_buttons();
+        if ((r & 15) == 15) maybe_acquire();
     }
 }
 
-static void render_strip(unsigned w) {
-    if (!layout.strip_h) return;
-    unsigned top = layout.strip_y;
-    lcd_fill_rect(0, top, w, layout.strip_h, COL_STRIP);
-    lcd_fill_rect(0, top, w, 1, COL_BG);
+/* The strip used to be blanked and rebuilt in full on every frame, which read
+ * as a constant flicker along the bottom edge. Bars are now repainted one slot
+ * at a time and the channel numbers live in their own row, which is painted
+ * once per band — nothing can erase them afterwards. */
+static struct {
+    bool valid;
+    unsigned w, count, selected;
+    bool usb;
+    uint8_t band;
+    uint8_t det[36], act[36], pk[36];
+} strip_cache;
+
+static unsigned strip_selected(unsigned count) {
+    unsigned w = lcd_width();
+    unsigned sel = usb_active ? (unsigned)((sel_x * (int)count) / (int)w) : channel;
+    return sel >= count ? count - 1 : sel;
+}
+
+/* Bars sit on the frequency axis, not on an even grid, so every slot lands
+ * directly under the slice of trace it was measured on, and the outermost bars
+ * reach the panel edges (the old (w-8)/n cells stopped short of the right
+ * edge). 2.4 GHz bypasses this and uses equal cells — see strip_slot(). */
+static unsigned strip_x(unsigned mhz, unsigned w) {
+    unsigned lo = band_lo(), span = band_hi() - band_lo();
+    if (span == 0 || !w) return 0;
+    if (mhz < lo) mhz = lo;
+    unsigned x = (mhz - lo) * w / span;
+    return x > w ? w : x;
+}
+
+#define STRIP_LABEL_Y (layout.strip_y + 2)
+#define STRIP_DET_Y   (layout.strip_y + 11)
+#define STRIP_ACT_Y   (layout.strip_y + 20)
+#define STRIP_BAR_H   7
+
+/* 5 GHz channels never overlap (all 20 MHz apart), so a bar can sit on the
+ * frequency axis and still line up with the trace above it.
+ *
+ * 2.4 GHz is the opposite: channels are 5 MHz apart but 20 MHz wide, so ch1 and
+ * ch2 overlap by 15 MHz. Mapping those blocks onto the axis made every bar 80 px
+ * wide and 20 px apart — thirteen bars drawn on top of each other, which is the
+ * "mess" the strip showed in 2.4G sweep. There is no layout that both fills the
+ * axis and avoids overlap, so 2.4G uses equal cells: one column pair per
+ * channel, spread over the full width. */
+static void strip_slot(unsigned i, unsigned w, unsigned *x0, unsigned *x1) {
+    if (cfg.band == UI_BAND_24G) {
+        unsigned count = band_count();
+        if (!count || i >= count) {
+            *x0 = 0;
+            *x1 = 0;
+            return;
+        }
+        *x0 = i * w / count;
+        *x1 = (i + 1) * w / count;
+        if (*x1 <= *x0 + 1) *x1 = *x0 + 2;
+        return;
+    }
+    unsigned f = band_mhz(i);
+    *x0 = strip_x(f > 10 ? f - 10 : 0, w);
+    *x1 = strip_x(f + 10, w);
+    if (*x1 <= *x0 + 1) *x1 = *x0 + 2;
+}
+
+static void strip_draw_bar(unsigned i, bool sel) {
+    unsigned w = lcd_width(), x0, x1;
+    if (i >= band_count()) return;
+    strip_slot(i, w, &x0, &x1);
+    /* 1 px gap between neighbouring channels, but the outermost block runs to
+     * the panel edge so the strip looks flush on both sides. */
+    unsigned slot = (x1 >= w) ? (x1 - x0) : (x1 > x0 + 1 ? x1 - x0 - 1 : 1);
+    unsigned det = ch_det[i] > 100 ? 100 : ch_det[i];
+    unsigned act = ch_act[i] > 100 ? 100 : ch_act[i];
+
+    lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, sel ? COL_TINT_C : 0x18C3);
+    if (det > 2) {
+        unsigned bw = slot * det / 100;
+        uint16_t dc = ch_pk[i] > 70 ? COL_RED : ch_pk[i] > 40 ? COL_PEAK : COL_GREEN;
+        lcd_fill_rect(x0, STRIP_DET_Y, bw ? bw : 1, STRIP_BAR_H, dc);
+    }
+    lcd_fill_rect(x0, STRIP_ACT_Y, slot, STRIP_BAR_H, sel ? COL_TINT_C : 0x1082);
+    if (act > 2) {
+        unsigned bw = slot * act / 100;
+        lcd_fill_rect(x0, STRIP_ACT_Y, bw ? bw : 1, STRIP_BAR_H, COL_USB);
+    }
+}
+
+/* Slots with no Wi-Fi channel (5320–5480, 5725–5745 …) get a faint warm wash so
+ * the blank stretch on the axis reads as "spectrum without a channel number"
+ * rather than as a hole in the rendering. */
+static void strip_draw_gaps(unsigned w) {
     unsigned count = band_count();
-    unsigned margin = 4;
-    unsigned gap = count > 20 ? 0 : 1;
-    unsigned cw = (w - margin * 2 - gap * (count - 1)) / count;
-    unsigned y = top + 3;
-    unsigned h = layout.strip_h - 6;
-    unsigned detH = 7, actH = 7, barGap = 2;
-    unsigned actY = y + h - actH;
-    unsigned detY = actY - barGap - detH;
-    unsigned labelY = y + (detY - y - FONT5X7_H) / 2;
-    unsigned selected = usb_active ? (unsigned)((sel_x * (int)count) / (int)w) : channel;
-    if (selected >= count) selected = count - 1;
+    /* 2.4 GHz channels overlap by design (5 MHz spacing, 20 MHz wide), so there
+     * is no "no channel here" stretch to mark. */
+    if (cfg.band != UI_BAND_5G) return;
+    for (unsigned i = 1; i < count; i++) {
+        unsigned prev = band_mhz(i - 1) + 10, cur = band_mhz(i) - 10;
+        if (cur <= prev + 2) continue;
+        unsigned x0 = strip_x(prev, w), x1 = strip_x(cur, w);
+        if (x1 > x0)
+            lcd_fill_rect(x0, STRIP_DET_Y, x1 - x0,
+                          STRIP_ACT_Y + STRIP_BAR_H - STRIP_DET_Y, 0x18A1);
+    }
+}
+
+static void strip_draw_labels(unsigned w) {
+    unsigned count = band_count();
+    unsigned last = 0;
+    bool first = true;
     char label[8];
     for (unsigned i = 0; i < count; i++) {
-        unsigned x = margin + i * (cw + gap);
-        if (i == selected) {
-            fill_round_rect(x, y, cw, h, 2, COL_TINT_C);
-            round_rect_border(x, y, cw, h, 2, COL_ACCENT);
-        }
-        unsigned track = cw > 2 ? cw - 2 : 1;
-        unsigned det = ch_det[i], act = ch_act[i];
-        lcd_fill_rect(x + 1, detY, track, detH, 0x2966);
-        uint16_t dc = ch_pk[i] > 70 ? COL_RED : ch_pk[i] > 40 ? COL_PEAK : COL_GREEN;
-        if (det > 2) {
-            unsigned bwid = track * det / 100;
-            lcd_fill_rect(x + 1, detY, bwid ? bwid : 1, detH, dc);
-        }
-        lcd_fill_rect(x + 1, actY, track, actH, 0x2105);
-        if (act > 2) {
-            unsigned bwid = track * act / 100;
-            lcd_fill_rect(x + 1, actY, bwid ? bwid : 1, actH, COL_USB);
-        }
-        bool grp = count <= 13 || i % 4 == 0 || i + 1 == count;
-        unsigned dist = selected > i ? selected - i : i - selected;
-        if (grp && i != selected && (count <= 13 || dist > 1)) {
-            snprintf(label, sizeof(label), "%u", band_number(i));
-            unsigned tw = text_w(label);
-            int lx = (int)(x + cw / 2) - (int)(tw / 2);
-            if (lx < 0) lx = 0;
-            ui_text((unsigned)lx, labelY, label, COL_DIM, COL_STRIP, false);
-        }
-    }
-    {
-        unsigned x = margin + selected * (cw + gap);
-        snprintf(label, sizeof(label), "%u", band_number(selected));
+        unsigned x0, x1;
+        strip_slot(i, w, &x0, &x1);
+        snprintf(label, sizeof(label), "%u", band_number(i));
         unsigned tw = text_w(label);
-        int lx = (int)(x + cw / 2) - (int)(tw / 2);
-        if (lx < 0) lx = 0;
-        ui_text((unsigned)lx, labelY, label, COL_TEXT, COL_TINT_C, false);
+        int lx = (int)((x0 + x1) / 2) - (int)(tw / 2);
+        if (lx < 1) lx = 1;
+        if (lx + (int)tw > (int)w - 1) lx = (int)w - 1 - (int)tw;
+        bool last_one = i + 1 == count;
+        if (!first && !last_one && (unsigned)lx < last + 4) continue;
+        ui_text((unsigned)lx, STRIP_LABEL_Y, label, COL_DIM, COL_STRIP, false);
+        last = (unsigned)(lx + (int)tw);
+        first = false;
     }
-    if (usb_active) {
-        lcd_fill_rect(w / 2 - 18, top + 2, 36, layout.strip_h - 4, COL_STRIP);
-        ui_text(w / 2 - 16, top + (layout.strip_h - FONT5X7_H) / 2, "USB", COL_USB, COL_STRIP, false);
+}
+
+/* Cursor: a short accent underline under the tuned 20 MHz block, in the empty
+ * row at the bottom of the strip. Erasing it is one flat fill, so moving the
+ * cursor never disturbs the labels above. */
+static void strip_draw_cursor(unsigned idx, bool on) {
+    unsigned w = lcd_width(), x0, x1;
+    if (idx >= band_count()) return;
+    strip_slot(idx, w, &x0, &x1);
+    unsigned slot = (x1 >= w) ? (x1 - x0) : (x1 > x0 + 1 ? x1 - x0 - 1 : 1);
+    lcd_fill_rect(x0, layout.strip_y + layout.strip_h - 3, slot, 2,
+                  on ? COL_ACCENT : COL_STRIP);
+}
+
+static void render_strip(unsigned w) {
+    unsigned count = band_count();
+    if (!layout.strip_h || !count) {
+        strip_cache.valid = false;
+        return;
+    }
+    unsigned selected = strip_selected(count);
+    bool full = !strip_cache.valid || strip_cache.w != w || strip_cache.count != count ||
+                strip_cache.usb != usb_active || strip_cache.band != cfg.band;
+    if (full) {
+        lcd_fill_rect(0, layout.strip_y, w, layout.strip_h, COL_STRIP);
+        lcd_fill_rect(0, layout.strip_y, w, 1, COL_BG);
+        strip_draw_gaps(w);
+        for (unsigned i = 0; i < count; i++) strip_draw_bar(i, false);
+        strip_draw_labels(w);
+        strip_draw_cursor(selected, true);
+        if (usb_active) {
+            lcd_fill_rect(w / 2 - 18, layout.strip_y + 2, 36, layout.strip_h - 4, COL_STRIP);
+            ui_text(w / 2 - 16, layout.strip_y + (layout.strip_h - FONT5X7_H) / 2, "USB", COL_USB,
+                    COL_STRIP, false);
+        }
+    } else {
+        if (strip_cache.selected != selected) {
+            strip_draw_cursor(strip_cache.selected, false);
+            strip_draw_bar(strip_cache.selected, false);
+            strip_draw_cursor(selected, true);
+        }
+        strip_draw_bar(selected, true);
+        for (unsigned i = 0; i < count; i++) {
+            if (strip_cache.det[i] != ch_det[i] || strip_cache.act[i] != ch_act[i] ||
+                strip_cache.pk[i] != ch_pk[i])
+                strip_draw_bar(i, i == selected);
+        }
+    }
+    strip_cache.valid = true;
+    strip_cache.w = w;
+    strip_cache.count = count;
+    strip_cache.selected = selected;
+    strip_cache.usb = usb_active;
+    strip_cache.band = cfg.band;
+    for (unsigned i = 0; i < count && i < 36; i++) {
+        strip_cache.det[i] = ch_det[i];
+        strip_cache.act[i] = ch_act[i];
+        strip_cache.pk[i] = ch_pk[i];
     }
 }
 
@@ -528,13 +867,21 @@ static void render_overlays(unsigned w) {
 static void render(void) {
     unsigned w = lcd_width();
     layout_build();
+    pump_buttons();
     if (full_clear) {
         lcd_fill(COL_BG);
+        top_cache.valid = false;
+        strip_cache.valid = false;
         full_clear = false;
     }
     render_top(w);
+    pump_buttons();
+    maybe_acquire();
     render_spectrum(w);
+    pump_buttons();
+    maybe_acquire();
     render_waterfall(w);
+    maybe_acquire();
     render_strip(w);
     render_overlays(w);
 }
@@ -590,14 +937,17 @@ static void publish_bars(void) {
 
 static void waterfall_push(void) {
     unsigned w = lcd_width();
-    unsigned rows = layout.wf_h;
     uint8_t *row = wf + wf_next * WF_STRIDE;
     if (w > WF_STRIDE) w = WF_STRIDE;
     if (cfg.mode == UI_MODE_SWEEP || usb_active)
         memcpy(row, band_codes, w);
     else
         for (unsigned x = 0; x < w; x++) row[x] = lerp8(codes, FFT_BINS, x, w);
-    wf_next = (wf_next + 1) % rows;
+    /* The ring is always WF_ROWS_MAX deep. Layout height is only a display
+     * size now: indexing by it wrote past the buffer (84 rows of history into a
+     * 64-row ring) and corrupted the heap, which is what rebooted the chip on
+     * every mode change. */
+    wf_next = (wf_next + 1) % WF_ROWS_MAX;
 }
 
 static void analyse(void) {
@@ -818,6 +1168,9 @@ static void toggle_mute(void) {
 
 static void handle_events(const ui_button_event_t *event) {
     uint16_t left = (uint16_t)(1u << UI_BTN_LEFT), right = (uint16_t)(1u << UI_BTN_RIGHT);
+    if (event->short_press || event->repeat || event->long_press || event->chord_mute)
+        trace("UI ev short=%04x rep=%04x long=%04x chord=%d\n", event->short_press, event->repeat,
+              event->long_press, (int)event->chord_mute);
     if (event->chord_mute) {
         toggle_mute();
         if (last_step) {
@@ -878,8 +1231,8 @@ static void countdown_poll(int64_t now) {
 
 static void ui_task(void *arg) {
     (void)arg;
-    int64_t last_acq = 0, last_render = 0;
-    ui_button_event_t event;
+    int64_t last_render = 0, last_tick = 0;
+    trace("UI task running\n");
     for (;;) {
         int64_t now = esp_timer_get_time();
         bool active = sdr_ui_host_active();
@@ -887,28 +1240,41 @@ static void ui_task(void *arg) {
             usb_active = active;
             if (active) full_clear = false;
         }
-        buttons_poll(&event);
+        pump_buttons();
         countdown_poll(now);
-        handle_events(&event);
-        if (!usb_active && now - last_acq >= SWEEP_PERIOD_US) {
-            last_acq = now;
-            acquire();
+        if (ev_acc.short_press || ev_acc.repeat || ev_acc.long_press || ev_acc.chord_mute) {
+            handle_events(&ev_acc);
+            memset(&ev_acc, 0, sizeof(ev_acc));
         }
+        maybe_acquire();
         unsigned period = usb_active ? HOST_PERIOD_US : RENDER_PERIOD_US;
         if (now - last_render >= period) {
             last_render = now;
-            if (!usb_active)
-                sel_x = ((int)channel * (int)lcd_width() + lcd_width() / 2) / (int)band_count();
+            if (!usb_active) {
+                sel_x = column_of(band_mhz(channel), lcd_width());
+                if (sel_x < 0) sel_x = 0;
+            }
             render();
+            /* Anything pressed while the frame was being painted is handled at
+             * the top of the next pass, so it still lands within ~10 ms. */
+        }
+        if (now - last_tick >= 2000000) {
+            last_tick = now;
+            trace("UI tick host=%d ch=%u scan=%u/%u pk=%d act=%d fl=%d top=%d bot=%d free=%u\n",
+                  (int)usb_active, (unsigned)channel, (unsigned)scan_index + 1, sweep_steps(),
+                  pk_db, act_db, floor_db_seen, view_top_db, view_bot_db,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
 static void palette_init(void) {
-    /* Cool-to-hot gradient from the approved design: navy, teal, green, amber, red. */
+    /* Cool-to-hot gradient from the approved design: navy, teal, green, amber, red.
+     * The first stop is pure black so the noise floor of the waterfall melts into
+     * the background instead of painting the whole strip navy. */
     static const uint8_t stops[8][3] = {
-        {16, 42, 67},   {14, 76, 107},  {10, 124, 138}, {18, 179, 168},
+        {0, 0, 0},      {8, 30, 52},    {10, 88, 118},  {18, 179, 168},
         {142, 212, 60}, {255, 210, 63}, {255, 140, 66}, {232, 70, 58},
     };
     for (unsigned i = 0; i < 256; i++) {
@@ -927,7 +1293,12 @@ static void palette_init(void) {
 }
 
 void local_ui_start(void) {
-    if (!lcd_init()) return;
+    trace("UI enter\n");
+    if (!lcd_init()) {
+        trace("UI lcd_init FAILED\n");
+        return;
+    }
+    trace("UI lcd ok\n");
     mask = heap_caps_malloc(MASK_BYTES, MALLOC_CAP_8BIT);
     spec_sum = heap_caps_malloc(320 * sizeof(float), MALLOC_CAP_8BIT);
     win_peak = heap_caps_malloc(FFT_BINS, MALLOC_CAP_8BIT);
@@ -935,7 +1306,11 @@ void local_ui_start(void) {
     wf = heap_caps_malloc(WF_STRIDE * WF_ROWS_MAX, MALLOC_CAP_8BIT);
     wf_line = heap_caps_malloc(320 * sizeof(uint16_t), MALLOC_CAP_8BIT);
     text_buf = heap_caps_malloc(TEXT_PIXELS * sizeof(uint16_t), MALLOC_CAP_8BIT);
-    if (!mask || !wf || !wf_line || !text_buf) return;
+    if (!mask || !wf || !wf_line || !text_buf) {
+        trace("UI alloc FAILED mask=%d wf=%d line=%d text=%d\n", mask != NULL, wf != NULL,
+              wf_line != NULL, text_buf != NULL);
+        return;
+    }
     memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
     palette_init();
 
@@ -951,5 +1326,9 @@ void local_ui_start(void) {
     muted = cfg.mute != 0;
     channel = (uint8_t)middle_index();
     scan_index = 0;
-    xTaskCreate(ui_task, "local_ui", 6144, NULL, 3, NULL);
+    BaseType_t created = xTaskCreate(ui_task, "local_ui", 6144, NULL, 3, NULL);
+    if (created != pdPASS)
+        created = xTaskCreate(ui_task, "local_ui", 4096, NULL, 3, NULL);
+    trace("UI ready task=%d buzz=%d mute=%d heap=%u\n", (int)created, (int)cfg.buzz, (int)cfg.mute,
+          (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
 }

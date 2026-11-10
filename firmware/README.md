@@ -4,78 +4,36 @@
 + 5 键 + 有源蜂鸣器编译的 `esp-sdr` 固件（`CONFIG_ESP_SDR_LOCAL_UI=y`）。
 
 面板原生 240×320，固件默认横屏使用（MADCTL `0x60`，坐标空间 320×240），
-按 R 可切回竖屏 240×320。`main/local_ui/st7789.c` 顶部另留了一个 ILI9341
-电源序列分支（`LCD_CTRL_ILI9341`），因为两种控制器外观完全一样，序列用错
-的表现都是满屏 GRAM 噪点。
+按 R 可切回竖屏 240×320。主界面为深色：顶栏（频段 / 模式 / 电平）、频谱 +
+峰值保持、瀑布、底部信道条。
 
 构建时间：2026-11-10，ESP-IDF v6.1，target `esp32c5`。
 
-## 接线自检开关
+## 两套固件，先选一套
 
-`main/local_ui/st7789.c` 顶部有两个编译开关，用于排查手工接线时最容易搞反的
-两对相邻引脚：
+| 镜像 | host 串口 | UI 日志 | 用在哪 |
+|---|---|---|---|
+| `esp32c5-lcd-full.bin` / `esp32c5-lcd-app.bin` | UART0 **2 Mbaud** | 关 | 正式版，可接上位机 burst 协议 |
+| `esp32c5-lcd-full-diag.bin` / `esp32c5-lcd-app-diag.bin` | UART0 **115200** | 开 | 调试版，CH340 转接板上能看 `UI tick ...` 电平日志 |
 
-| 宏 | 作用 |
-|---|---|
-| `LCD_SWAP_SCL_SDI` | 1 = 按 SCL→GPIO7、SDI→GPIO6 驱动 |
-| `LCD_SWAP_DC_RST` | 1 = 按 RES→GPIO4、AO→GPIO5 驱动 |
-
-改宏后重新编译即可，不用动杜邦线。
-
-## 引脚探针（查丝印、查按键接线）
-
-`esp32c5-lcd-pinprobe.bin` 是一个独立的小工程（源码在
-`main/local_ui/pin_probe.c`，用 `CONFIG_ESP_SDR_PIN_PROBE` 打开）。它不启动
-射频、不初始化屏幕、不读按键，只把所有排针 GPIO 设成上拉输入：拿一根 GND
-线去碰任意一个针，蜂鸣器把这个针的 **GPIO 号**报出来。
-
-只烧这一支，不碰 bootloader 和分区表：
-
-```bash
-python -m esptool --chip esp32c5 -p COM8 -b 460800 \
-  write-flash --flash-mode dio --flash-size 2MB --flash-freq 80m \
-  0x10000 esp32c5-lcd-pinprobe.bin
-```
-
-退回正常固件：重新烧 `esp32c5-lcd-full.bin` 即可。
-
-**报号规则**：400 ms 长音开头 → 十位（每声 160 ms）→ 停 600 ms → 个位。
-末尾单独一声 700 ms 长音表示 0。
-
-| 听到 | 是 |
-|---|---|
-| 2 声、停、4 声 | GPIO24 |
-| 6 声（中间不停） | GPIO6 |
-| 1 声、停、一声长音 | GPIO10 |
-| 一声长音 | GPIO0 |
-
-开机上电先响 3 声短音表示活着。如果开机什么都没碰就自己报号，说明那些脚在
-上电时就被短到 GND 了（按键那条公共地接错）。
-
-## 背光电流（务必看）
-
-GMT032 模块的背光是 6 颗 LED，工作电流约 **90–95 mA**，远超单个 GPIO 的
-承受能力（≤40 mA，推荐 20 mA）。**BL 不要直连 GPIO23**，二选一：
-
-- 应急：BL 直接接 3V3，常亮，切断 GPIO23 那根线；
-- 正规：S8050 低边开关，GPIO23 → 1 kΩ → 基极，发射极 GND，集电极接 BL。
+两者屏幕、按键、扫描逻辑完全相同，只差 `CONFIG_ESP_SDR_UART_BAUD`。
+`ui.c` 里的 `UI_TRACE` 会跟着这个宏自动开关：115200 时往 UART0 打日志，
+2 Mbaud 时静默，否则 UI 文本会混进 host 协议流。USB-Serial-JTAG 口不受影响。
 
 ## 文件
 
 | 文件 | 偏移 | 大小 | 说明 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` | `0x0` | 941552 | 合并镜像，ST7789 默认，一次烧完 |
-| `esp32c5-lcd-full-ili9341.bin` | `0x0` | 941872 | 合并镜像，ILI9341 试验版（见下） |
+| `esp32c5-lcd-full.bin` | `0x0` | 944096 | **正式版**合并镜像，一次烧完 |
+| `esp32c5-lcd-app.bin` | `0x10000` | 878560 | 正式版应用（占 1 MB 分区 84%） |
+| `esp32c5-lcd-full-diag.bin` | `0x0` | 945792 | 诊断版合并镜像（115200 + UI 日志） |
+| `esp32c5-lcd-app-diag.bin` | `0x10000` | 877648 | 诊断版应用 |
+| `esp32c5-lcd-pinprobe.bin` | `0x10000` | 136736 | 引脚探针，只烧应用，见下 |
 | `esp32c5-lcd-bootloader.bin` | `0x2000` | 22160 | 二级引导 |
 | `esp32c5-lcd-partition-table.bin` | `0x8000` | 3072 | 分区表 |
-| `esp32c5-lcd-app.bin` | `0x10000` | 876016 | 应用，ST7789（占 1 MB 分区 84%） |
-| `esp32c5-lcd-app-ili9341.bin` | `0x10000` | 876336 | 应用，ILI9341 |
-| `esp32c5-lcd-pinprobe.bin` | `0x10000` | 143888 | 引脚探针，只烧应用，见下 |
+| `esp32c5-lcd-full-ili9341.bin` | `0x0` | 941872 | 早期 ILI9341 试验镜像，仅留档，勿用 |
 
-两个 `full` 镜像只差初始化序列。屏完全不出图时各烧一次，能出纯色就说明
-控制器型号对了，之后用对应版本即可。
-
-Flash 2 MB，DIO，80 MHz。
+Flash 2 MB，DIO，80 MHz。`full` 镜像由 `merge_full.py` 把三段按偏移拼成单文件。
 
 ## 烧写
 
@@ -95,13 +53,22 @@ python -m esptool --chip esp32c5 -p COM5 -b 460800 \
   write-flash 0x10000 esp32c5-lcd-app.bin
 ```
 
-从源码重新构建：
+## 从源码构建
+
+正式版（默认 host 2 Mbaud）：
 
 ```bash
 export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c5;sdkconfig.defaults.esp32c5-lcd"
-idf.py set-target esp32c5
-idf.py build
+bash build.sh set-target esp32c5
+bash build.sh build
+cp build/esp_sdr.bin firmware/esp32c5-lcd-app.bin
+python merge_full.py
 ```
+
+诊断版：在 `SDKCONFIG_DEFAULTS` 末尾再加一个
+`;sdkconfig.defaults.esp32c5-lcd-diag`，重新 `set-target` + `build`，产物另存为
+`*-diag.bin`。`build.sh` / `_idfwrap.py` 只是剥掉本机 shell 注入的 `MSYSTEM`，
+否则 IDF 6.x 拒绝启动。
 
 ## 接线
 
@@ -128,24 +95,71 @@ idf.py build
 | 蜂鸣器 | GPIO25 | 右排 13 |
 
 按键对地、内部上拉，低电平有效；蜂鸣器经 NPN（S8050）驱动，基极串 1 kΩ。
+GPIO13/14 是 USB D-/D+，GPIO11/12 是 UART0 控制台，**不要**拿来接屏或按键。
 
 引脚定义在 `main/local_ui/board_c5_lcd.h`，改线只需改这一处。
 
-## 上电预期
+## 背光电流（务必看）
 
-背光先亮，接着是一段约 2 秒的开机自检：红、绿、蓝、白、黑满屏，再画白色
-1 px 外框 + 16 px 黑白棋盘，最后清屏进入主界面。
+GMT032 模块的背光是 6 颗 LED，工作电流约 **90–95 mA**，远超单个 GPIO 的
+承受能力（≤40 mA，推荐 20 mA）。**BL 不要直连 GPIO23**，二选一：
 
-自检就是给接线用的判据：
+- 应急：BL 直接接 3V3，常亮，切断 GPIO23 那根线；
+- 正规：S8050 低边开关，GPIO23 → 1 kΩ → 基极，发射极 GND，集电极接 BL。
 
-- 五块纯色没有杂点、外框四条边都贴边、棋盘格棱角分明 → 总线和窗口都对，
-  主界面再花就是绘制逻辑的事。
-- 纯色里出现彩色噪点或斜纹 → SPI 时钟太快或某根数据线虚接。把
-  `main/local_ui/st7789.c` 里的 `LCD_SPI_HZ` 降到 10000000 再试。
-- 外框偏移、缺一条边、棋盘被裁掉一部分 → 面板可见区有偏移，调
-  `LCD_OFS_X` / `LCD_OFS_Y`（240×320 面板通常 0/0）。
+## 驱动上踩过的坑（改代码前先看）
 
-自检确认没问题后，把 `LCD_SELFTEST` 改成 0 重新编译即可关掉。
+- **SPI 4 MHz + DMA**：`LCD_SPI_HZ=4000000`、`SPI_DMA_CH_AUTO` 必须成对。这组
+  15 cm 杜邦线上 8 MHz 无 DMA 会丢字节（纯白 / 一根竖线 / GRAM 雪花随机出现）。
+  只降速不换 DMA 也可能不起图。
+- **CS 手动拉**：`spics_io_num=-1`，命令 / 参数 / 像素在同一 CS 窗口内发完，
+  前后各留 2 µs 建立时间。
+- **颜色取反**：这块玻璃对 `INVON/INVOFF` 的表现和预期相反，靠命令调不出深色
+  背景。驱动保留厂商的 `0x21`，但每个像素在发送前用 `LCD_PIX(v) = v ^ 0xffff`
+  软件取反，两次反转抵消。
+- **`LCD_SELFTEST=0`**：出厂自检（纯色 + 棋盘）已关，上电直接进主界面。需要排查
+  接线时把它改成 1 重新编译。
+- **瀑布 64 行环形缓冲**：120 行会吃光内部 RAM，`xTaskCreate` 直接返回 -1，
+  表现为按键切换模式后红蓝屏重启。
 
-自检结束后进入主界面：频谱 + 瀑布，顶栏显示频段与模式；按 ←/→ 走信道，
-B 切 2.4G/5G，M 切 LIVE/SWEEP，R 转屏，← + → 同时按静音。
+`main/local_ui/st7789.c` 顶部还留着两个接线排错开关：
+
+| 宏 | 作用 |
+|---|---|
+| `LCD_SWAP_SCL_SDI` | 1 = 按 SCL→GPIO7、SDI→GPIO6 驱动 |
+| `LCD_SWAP_DC_RST` | 1 = 按 RES→GPIO4、AO→GPIO5 驱动 |
+
+## 操作
+
+←/→ 走信道，B 切 2.4G / 5G，M 切 LIVE / SWEEP，R 转屏，← + → 同时按静音。
+SWEEP 全段约 3.4 s（每步 77–95 ms）；渲染期间会插空采样按键和射频，
+所以长按时仍可切模式。底栏 2.4G 按 1–13 等分格子，5G 按真实中心频率
+（36–64 / 100–144 / 149–177）贴边铺满，非等分处留空档。
+
+## 引脚探针（查丝印、查按键接线）
+
+`esp32c5-lcd-pinprobe.bin` 是不启动射频、不初始化屏幕的独立小工程
+（`CONFIG_ESP_SDR_PIN_PROBE`）。把所有排针 GPIO 设成上拉输入，拿一根 GND 线
+去碰任意针，蜂鸣器把这个针的 **GPIO 号**报出来。探测表已剔除
+13/14（USB）和 11/12（console）。
+
+只烧这一支，不碰 bootloader 和分区表：
+
+```bash
+python -m esptool --chip esp32c5 -p COM8 -b 460800 \
+  write-flash --flash-mode dio --flash-size 2MB --flash-freq 80m \
+  0x10000 esp32c5-lcd-pinprobe.bin
+```
+
+退回正常固件：重新烧 `esp32c5-lcd-full.bin` 即可。
+
+**报号规则**：400 ms 长音开头 → 十位（每声 160 ms）→ 停 600 ms → 个位，
+末尾单独一声 700 ms 长音表示 0。开机先响 3 声短音表示活着；什么都没碰就
+自己报号，说明那些脚上电时已被短到 GND。
+
+| 听到 | 是 |
+|---|---|
+| 2 声、停、4 声 | GPIO24 |
+| 6 声（中间不停） | GPIO6 |
+| 1 声、停、一声长音 | GPIO10 |
+| 一声长音 | GPIO0 |
