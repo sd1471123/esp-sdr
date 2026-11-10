@@ -15,8 +15,7 @@ typedef struct {
     int8_t bottom_db;      /* SWEEP lower limit */
     int8_t live_top_db;    /* LIVE upper limit — independent of SWEEP */
     int8_t live_bottom_db; /* LIVE lower limit */
-    uint8_t auto_scale;    /* SWEEP only: 1 = follow the noise floor, 0 = manual.
-                            * LIVE is always fixed and ignores this flag. */
+    /* Both modes are fixed; there is no auto-range flag any more. */
 } ui_settings_t;
 
 void ui_settings_defaults(ui_settings_t *settings);

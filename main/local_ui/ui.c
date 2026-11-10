@@ -272,52 +272,11 @@ static void apply_stored_scale(void) {
     view_bot_db = live ? cfg.live_bottom_db : cfg.bottom_db;
 }
 
-static void update_view_scale(void) {
-    /* LIVE must not chase the noise floor: its dB axis used to drift on every
-     * capture, so the grid and the trace wandered vertically whenever the tuner
-     * moved or the noise changed. LIVE always uses its own stored limits; SWEEP
-     * uses its own pair once a chord made it manual, otherwise it auto-ranges.
-     * Neither mode can disturb the other's limits. */
-    if (cfg.mode == UI_MODE_LIVE || !cfg.auto_scale) {
-        apply_stored_scale();
-        return;
-    }
-    unsigned w = lcd_width();
-    bool band_view = cfg.mode == UI_MODE_SWEEP || usb_active;
-    int hist[64];
-    unsigned n = 0, strongest = 0;
-    for (unsigned k = 0; k < 64; k++) {
-        unsigned x = (k * (w - 1)) / 63;
-        if (band_view) {
-            if (!col_seen_bit(x)) continue;
-            hist[n++] = (int)band_codes[x] / 2 - 84;
-            if (band_peak[x] > strongest) strongest = band_peak[x];
-        } else {
-            hist[n++] = (int)lerp8(codes, FFT_BINS, x, w) / 2 - 84;
-            if (win_peak && win_peak[(k * (FFT_BINS - 1)) / 63] > strongest)
-                strongest = win_peak[(k * (FFT_BINS - 1)) / 63];
-        }
-    }
-    if (!n) return;
-    for (unsigned i = 1; i < n; i++) {
-        int v = hist[i], j = (int)i;
-        while (j > 0 && hist[j - 1] > v) {
-            hist[j] = hist[j - 1];
-            j--;
-        }
-        hist[j] = v;
-    }
-    int floor_db = hist[n / 5];
-    floor_db_seen = floor_db;
-    int target = floor_db + 55;
-    int peak_db_c = (int)strongest / 2 - 84;
-    if (peak_db_c > target - 8) target = peak_db_c + 8;
-    int delta = target - view_top_db;
-    int step = delta * (delta > 0 ? 40 : 6) / 100;
-    if (delta && !step) step = delta > 0 ? 1 : -1;
-    view_top_db += step;
-    view_bot_db = view_top_db - 70;
-}
+/* There is no auto-range on either mode. Both use their own stored dB limits,
+ * applied by apply_stored_scale() at every point where the mode or those limits
+ * can change: boot, mode/band switch, a limit chord, factory reset. The old
+ * noise-floor follower made the grid and trace drift on every capture, which is
+ * exactly why the LIVE axis looked unstable. */
 
 /* ch104 in 5G, ch7 in 2.4G: where the cursor and the sweep start (design spec). */
 static unsigned middle_index(void) { return (band_count() - 1) / 2; }
@@ -1011,6 +970,7 @@ static void publish_bars(void) {
         hist[j] = v;
     }
     int floor_db = hist[n / 5];
+    floor_db_seen = floor_db; /* diagnostics only: the dB axis no longer follows it */
     sweeps++;
     for (unsigned c = 0; c < count && c < 36; c++) {
         unsigned centre = band_mhz(c);
@@ -1146,7 +1106,6 @@ static void acquire(void) {
         publish_bars();
     }
     analyse();
-    update_view_scale();
     waterfall_push();
     (void)elapsed;
 }
@@ -1176,7 +1135,6 @@ static void adjust_limit(bool top, int direction) {
         if (value > *hi - 30) value = *hi - 30;
     }
     *limit = (int8_t)value;
-    if (!live) cfg.auto_scale = 0; /* only a SWEEP chord disables SWEEP auto-range */
     apply_stored_scale();
     ui_settings_save(&cfg);
     buzzer_play(top ? UI_BUZZ_TOP : UI_BUZZ_BOTTOM);
