@@ -1,0 +1,59 @@
+name: Publish LCD release
+
+# Publishing the panel firmware goes through GitHub Actions so that no local
+# credential is ever needed: the job uses the repository's own token.
+# Push a c5-lcd-* tag to publish; every older release is removed first so the
+# branch only ever advertises the newest image.
+
+on:
+  push:
+    tags:
+      - 'c5-lcd-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Drop the previous releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release list --limit 100 --json tagName \
+            | jq -r '.[].tagName' \
+            | while read -r tag; do
+                if [ "$tag" = "$KEEP" ]; then
+                  echo "keeping $tag"
+                  continue
+                fi
+                echo "deleting release $tag"
+                gh release delete "$tag" --yes --cleanup-tag || true
+              done
+      - name: Publish the images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "ESP32-C5 LCD panel firmware $TAG" \
+            --notes-file docs/lcd-release-notes.md \
+            firmware/esp32c5-lcd-full.bin \
+            firmware/esp32c5-lcd-app.bin \
+            firmware/esp32c5-lcd-full-4mhz.bin \
+            firmware/esp32c5-lcd-app-4mhz.bin \
+            firmware/esp32c5-lcd-full-diag.bin \
+            firmware/esp32c5-lcd-app-diag.bin \
+            firmware/esp32c5-lcd-pinprobe.bin
