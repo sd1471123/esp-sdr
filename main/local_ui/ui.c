@@ -263,15 +263,23 @@ static uint8_t disp_hold(unsigned x, unsigned w) {
     return win_peak ? lerp8(win_peak, FFT_BINS, x, w) : 0;
 }
 
+/* Load the vertical limits belonging to the mode currently on screen. The two
+ * modes own independent pairs, so switching mode/band or leaving a limit chord
+ * must re-point the view at the right pair immediately. */
+static void apply_stored_scale(void) {
+    bool live = cfg.mode == UI_MODE_LIVE;
+    view_top_db = live ? cfg.live_top_db : cfg.top_db;
+    view_bot_db = live ? cfg.live_bottom_db : cfg.bottom_db;
+}
+
 static void update_view_scale(void) {
     /* LIVE must not chase the noise floor: its dB axis used to drift on every
      * capture, so the grid and the trace wandered vertically whenever the tuner
-     * moved or the noise changed. LIVE always uses the stored limits; SWEEP keeps
-     * its automatic range until a limit chord is used, which persists auto_scale=0
-     * in NVS so the choice survives a reboot. */
-    if (!cfg.auto_scale || cfg.mode == UI_MODE_LIVE) {
-        view_top_db = cfg.top_db;
-        view_bot_db = cfg.bottom_db;
+     * moved or the noise changed. LIVE always uses its own stored limits; SWEEP
+     * uses its own pair once a chord made it manual, otherwise it auto-ranges.
+     * Neither mode can disturb the other's limits. */
+    if (cfg.mode == UI_MODE_LIVE || !cfg.auto_scale) {
+        apply_stored_scale();
         return;
     }
     unsigned w = lcd_width();
@@ -1151,19 +1159,25 @@ static void change_channel(int direction) {
 }
 
 static void adjust_limit(bool top, int direction) {
-    int8_t *limit = top ? &cfg.top_db : &cfg.bottom_db;
+    /* A chord only edits the pair for the mode on screen. Tuning LIVE can no
+     * longer move the SWEEP window, and vice versa. */
+    bool live = cfg.mode == UI_MODE_LIVE;
+    int8_t *hi = live ? &cfg.live_top_db : &cfg.top_db;
+    int8_t *lo = live ? &cfg.live_bottom_db : &cfg.bottom_db;
+    int8_t *limit = top ? hi : lo;
     int value = *limit + (direction > 0 ? 5 : -5);
     if (top) {
         if (value > -10) value = -10;
         if (value < -80) value = -80;
-        if (value < cfg.bottom_db + 30) value = cfg.bottom_db + 30;
+        if (value < *lo + 30) value = *lo + 30;
     } else {
         if (value < -125) value = -125;
         if (value > -55) value = -55;
-        if (value > cfg.top_db - 30) value = cfg.top_db - 30;
+        if (value > *hi - 30) value = *hi - 30;
     }
-    *limit = value;
-    cfg.auto_scale = 0; /* any manual limit switches off SWEEP auto-range for good */
+    *limit = (int8_t)value;
+    if (!live) cfg.auto_scale = 0; /* only a SWEEP chord disables SWEEP auto-range */
+    apply_stored_scale();
     ui_settings_save(&cfg);
     buzzer_play(top ? UI_BUZZ_TOP : UI_BUZZ_BOTTOM);
 }
@@ -1185,11 +1199,9 @@ static void toggle_band(void) {
     memset(ch_hits, 0, sizeof(ch_hits));
     if (win_peak) memset(win_peak, 0, FFT_BINS);
     sweeps = 0;
-    /* Keep the stored limits: switching band must not silently undo a manual
-     * range the user set with a chord, nor leave the axis at the old band's
-     * auto-range value. */
-    view_top_db = cfg.top_db;
-    view_bot_db = cfg.bottom_db;
+    /* Keep each mode's own limits: switching band must not undo a manual range
+     * set with a chord, nor leave the axis on the other mode's values. */
+    apply_stored_scale();
     ch_seen = 0;
     have_data = false;
     ui_settings_save(&cfg);
@@ -1200,12 +1212,9 @@ static void toggle_band(void) {
 static void toggle_mode(void) {
     cfg.mode = cfg.mode == UI_MODE_SWEEP ? UI_MODE_LIVE : UI_MODE_SWEEP;
     if (cfg.mode == UI_MODE_SWEEP) channel = (uint8_t)middle_index();
-    /* Drop SWEEP's auto-ranged limits the moment LIVE is entered, otherwise the
-     * first frame after the switch still shows the old drifting window. */
-    if (cfg.mode == UI_MODE_LIVE) {
-        view_top_db = cfg.top_db;
-        view_bot_db = cfg.bottom_db;
-    }
+    /* Snap to the incoming mode's own limits so the first frame after the
+     * switch never shows the other mode's dB window. */
+    apply_stored_scale();
     layout_build();
     scan_index = 0;
     memset(band_codes, 0, sizeof(band_codes));
@@ -1236,8 +1245,7 @@ static void reset_defaults(void) {
     ui_settings_t fresh;
     ui_settings_defaults(&fresh);
     cfg = fresh;
-    view_top_db = cfg.top_db;
-    view_bot_db = cfg.bottom_db;
+    apply_stored_scale();
     muted = false;
     buzzer_enable(true);
     channel = (uint8_t)middle_index();
@@ -1417,12 +1425,9 @@ void local_ui_start(void) {
     ui_settings_load(&cfg);
     lcd_set_rotation(cfg.landscape != 0);
     layout_build();
-    /* Booting straight into LIVE must start on the stored dB limits, not on the
-     * compile-time -30/-100 defaults that SWEEP would then auto-range away. */
-    if (cfg.mode == UI_MODE_LIVE) {
-        view_top_db = cfg.top_db;
-        view_bot_db = cfg.bottom_db;
-    }
+    /* Start on the stored limits for the boot mode, not on the compile-time
+     * -30/-100 defaults that a SWEEP auto-range would then walk away from. */
+    apply_stored_scale();
 
     buttons_init();
     buzzer_init();

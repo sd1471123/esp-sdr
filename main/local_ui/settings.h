@@ -11,10 +11,12 @@ typedef struct {
     uint8_t landscape; /* 1 = 320x240 */
     uint8_t buzz;      /* 1 = buzzer enabled */
     uint8_t mute;      /* 1 = muted (persisted with the chord) */
-    int8_t top_db;     /* spectrum upper limit */
-    int8_t bottom_db;  /* spectrum lower limit */
-    uint8_t auto_scale;/* 1 = SWEEP follows the noise floor; 0 = manual limits.
-                        * LIVE always uses the stored limits, never auto. */
+    int8_t top_db;         /* SWEEP upper limit */
+    int8_t bottom_db;      /* SWEEP lower limit */
+    int8_t live_top_db;    /* LIVE upper limit — independent of SWEEP */
+    int8_t live_bottom_db; /* LIVE lower limit */
+    uint8_t auto_scale;    /* SWEEP only: 1 = follow the noise floor, 0 = manual.
+                            * LIVE is always fixed and ignores this flag. */
 } ui_settings_t;
 
 void ui_settings_defaults(ui_settings_t *settings);
