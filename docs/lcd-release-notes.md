@@ -28,12 +28,12 @@ python -m esptool --chip esp32c5 -p COM6 -b 460800 \
 
 | 文件 | 偏移 | 大小 | 说明 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` | `0x0` | 945184 | 正式版合并镜像，SPI **8 MHz** |
-| `esp32c5-lcd-app.bin` | `0x10000` | 879648 | 正式版应用 |
-| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 945184 | **4 MHz 回退镜像**，代码相同，长杜邦线上 8 MHz 出问题时用这个 |
-| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 879648 | 4 MHz 回退应用 |
-| `esp32c5-lcd-full-diag.bin` | `0x0` | 945792 | 调试快照，UART0 115200 + UI 日志（**不含**最新 UI 改动） |
-| `esp32c5-lcd-app-diag.bin` | `0x10000` | 877648 | 调试快照应用 |
+| `esp32c5-lcd-full.bin` | `0x0` | 945264 | 正式版合并镜像，SPI **8 MHz** |
+| `esp32c5-lcd-app.bin` | `0x10000` | 879728 | 正式版应用 |
+| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 945264 | **4 MHz 回退镜像**，代码相同，长杜邦线上 8 MHz 出问题时用这个 |
+| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 879728 | 4 MHz 回退应用 |
+| `esp32c5-lcd-full-diag.bin` | `0x0` | 946960 | 调试版，UART0 115200 + UI 日志，与正式版同一份代码 |
+| `esp32c5-lcd-app-diag.bin` | `0x10000` | 881424 | 调试版应用 |
 | `esp32c5-lcd-pinprobe.bin` | `0x10000` | 136736 | 引脚探针，只烧应用：碰一下排针就用蜂鸣器报出 GPIO 号 |
 
 ## 这一版的要点
@@ -41,6 +41,8 @@ python -m esptool --chip esp32c5 -p COM6 -b 460800 \
 - 顶栏、频谱、瀑布全部改为**单窗口连续写**，顶栏用整张 2-bit 位图原子替换，
   消掉了原来一块块小窗口重写造成的闪烁。
 - SPI 提到 **8 MHz + DMA**，一帧写屏时间从约 270 ms 降到约 135 ms。
+- SWEEP 扫描提速：采集节流从 80 ms 降到 30 ms，瀑布绘制中每 16 行再插一个
+  采集时隙，一帧可完成 3～4 步，5 GHz 全段明显快于之前的约 3.4 秒。
 - 纵轴 dB 量程**没有自动量程**：2.4G / 5G × LIVE / SWEEP 四套独立上下限，
   写进 NVS，重启保留，只能用 B+←/→ 与 M+←/→ 组合键调整。
 - SWEEP 频谱上新增当前信道的 **20 MHz 选框**，与底栏游标对齐。

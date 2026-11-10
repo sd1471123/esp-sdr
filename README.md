@@ -34,7 +34,7 @@
 
 | 模式 | 行为 |
 |---|---|
-| `SWEEP` | 20 MHz 步进扫完整个频段，5 GHz 约 38 步、3 秒左右走完 |
+| `SWEEP` | 20 MHz 步进扫完整个频段，5 GHz 共 38 步 |
 | `LIVE` | 锁定一个信道持续采集，频率轴显示当前 ±10 MHz |
 
 **两个频段**
@@ -105,11 +105,12 @@ GPIO13/14 是 USB D-/D+，GPIO11/12 是 UART0 控制台，都不要拿来接屏�
 
 | 文件 | 偏移 | 大小 | 说明 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` | `0x0` | 945184 | **正式版**合并镜像（SPI 8 MHz），一次烧完 |
-| `esp32c5-lcd-app.bin` | `0x10000` | 879648 | 正式版应用（占 1 MB 分区 84%） |
-| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 945184 | 4 MHz 回退镜像，代码相同只是时钟更低 |
-| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 879648 | 4 MHz 回退应用 |
-| `esp32c5-lcd-full-diag.bin` | `0x0` | 945792 | 调试快照（115200 + UI 日志），非最新代码 |
+| `esp32c5-lcd-full.bin` | `0x0` | 945264 | **正式版**合并镜像（SPI 8 MHz），一次烧完 |
+| `esp32c5-lcd-app.bin` | `0x10000` | 879728 | 正式版应用（占 1 MB 分区 84%） |
+| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 945264 | 4 MHz 回退镜像，代码相同只是时钟更低 |
+| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 879728 | 4 MHz 回退应用 |
+| `esp32c5-lcd-full-diag.bin` | `0x0` | 946960 | 调试版（115200 + UI 日志），与正式版同一份代码 |
+| `esp32c5-lcd-app-diag.bin` | `0x10000` | 881424 | 调试版应用 |
 | `esp32c5-lcd-pinprobe.bin` | `0x10000` | 136736 | 引脚探针：碰一下针脚就用蜂鸣器报出 GPIO 号 |
 
 Flash 2 MB，DIO，80 MHz。`full` 镜像由 `merge_full.py` 把三段按偏移拼成单文件。

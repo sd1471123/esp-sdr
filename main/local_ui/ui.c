@@ -105,7 +105,17 @@ static void trace(const char *fmt, ...) { (void)fmt; }
 #define COL_USB     0x07FF
 #define COL_MUTE    0xF800
 
-#define SWEEP_PERIOD_US  80000
+/* Minimum spacing between two sweep captures.
+ *
+ * This used to be 80 ms, which was the real limit on how fast a band pass could
+ * run: the RF part of a step takes about 15 ms, so two thirds of every step was
+ * pure waiting. The renderer is the other constraint — it owns the CPU for
+ * ~135 ms per frame, so the number of capture slots inside a frame decides the
+ * achievable rate. The waterfall now offers one every 16 rows again, which
+ * brings a frame to ~11 slots, and the spacing below is what separates them.
+ * 30 ms keeps a comfortable margin over the ~15 ms the RF needs to settle.
+ */
+#define SWEEP_PERIOD_US  30000
 /* A frame is ~134 KB: ~270 ms at 4 MHz, ~135 ms at 8 MHz. Asking for less than
  * the frame time made render() start the next frame the instant it returned, so
  * the panel never got a still picture and the write seam never stopped moving.
@@ -722,6 +732,10 @@ static void render_waterfall(unsigned w) {
         }
         lcd_pixels_cont(wf_line, w);
         if ((r & 7) == 7) pump_buttons();
+        /* A capture slot every 16 rows. The ring index is frozen for this frame,
+         * so a capture landing here cannot shift the rows underneath us; at most
+         * the single row it just pushed in shows up early. */
+        if ((r & 15) == 15) maybe_acquire();
     }
     lcd_pixels_end();
 }
