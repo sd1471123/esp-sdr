@@ -17,6 +17,7 @@ void ui_settings_defaults(ui_settings_t *s) {
     s->mute = 0;
     s->top_db = -26;
     s->bottom_db = -105;
+    s->auto_scale = 1;
 }
 
 static void sanitize(ui_settings_t *s) {
@@ -25,6 +26,7 @@ static void sanitize(ui_settings_t *s) {
     if (s->landscape > 1) s->landscape = 1;
     if (s->buzz > 1) s->buzz = 1;
     if (s->mute > 1) s->mute = 1;
+    if (s->auto_scale > 1) s->auto_scale = 1;
     s->top_db = clamp_db(s->top_db, -80, -10);
     s->bottom_db = clamp_db(s->bottom_db, -125, -55);
     if (s->bottom_db > s->top_db - 30) s->bottom_db = s->top_db - 30;
@@ -43,6 +45,8 @@ void ui_settings_load(ui_settings_t *s) {
     int8_t d;
     if (nvs_get_i8(handle, "top", &d) == ESP_OK) s->top_db = d;
     if (nvs_get_i8(handle, "bot", &d) == ESP_OK) s->bottom_db = d;
+    /* Older NVS blobs have no "auto" key: keep the default (SWEEP auto). */
+    if (nvs_get_u8(handle, "auto", &v) == ESP_OK) s->auto_scale = v;
     nvs_close(handle);
     sanitize(s);
 }
@@ -57,6 +61,7 @@ void ui_settings_save(const ui_settings_t *s) {
     nvs_set_u8(handle, "mute", s->mute);
     nvs_set_i8(handle, "top", s->top_db);
     nvs_set_i8(handle, "bot", s->bottom_db);
+    nvs_set_u8(handle, "auto", s->auto_scale);
     nvs_commit(handle);
     nvs_close(handle);
 }
