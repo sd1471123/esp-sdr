@@ -11,11 +11,12 @@ typedef struct {
     uint8_t landscape; /* 1 = 320x240 */
     uint8_t buzz;      /* 1 = buzzer enabled */
     uint8_t mute;      /* 1 = muted (persisted with the chord) */
-    int8_t top_db;         /* SWEEP upper limit */
-    int8_t bottom_db;      /* SWEEP lower limit */
-    int8_t live_top_db;    /* LIVE upper limit — independent of SWEEP */
-    int8_t live_bottom_db; /* LIVE lower limit */
-    /* Both modes are fixed; there is no auto-range flag any more. */
+    /* Four independent dB windows: SWEEP/LIVE x 2.4G/5G. Each array is indexed
+     * by ui_band_t (0 = 2.4G, 1 = 5G). Both modes are fixed; no auto-range. */
+    int8_t top_db[2];         /* SWEEP upper limit */
+    int8_t bottom_db[2];      /* SWEEP lower limit */
+    int8_t live_top_db[2];    /* LIVE upper limit */
+    int8_t live_bottom_db[2]; /* LIVE lower limit */
 } ui_settings_t;
 
 void ui_settings_defaults(ui_settings_t *settings);

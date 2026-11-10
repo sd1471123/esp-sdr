@@ -263,13 +263,18 @@ static uint8_t disp_hold(unsigned x, unsigned w) {
     return win_peak ? lerp8(win_peak, FFT_BINS, x, w) : 0;
 }
 
-/* Load the vertical limits belonging to the mode currently on screen. The two
- * modes own independent pairs, so switching mode/band or leaving a limit chord
- * must re-point the view at the right pair immediately. */
+/* Load the vertical limits for the exact band + mode on screen. All four
+ * combinations own their own pair, so switching band, mode, or leaving a limit
+ * chord must re-point the view immediately. No auto-range anywhere. */
+static unsigned scale_band(void) {
+    return cfg.band == UI_BAND_5G ? UI_BAND_5G : UI_BAND_24G;
+}
+
 static void apply_stored_scale(void) {
+    unsigned b = scale_band();
     bool live = cfg.mode == UI_MODE_LIVE;
-    view_top_db = live ? cfg.live_top_db : cfg.top_db;
-    view_bot_db = live ? cfg.live_bottom_db : cfg.bottom_db;
+    view_top_db = live ? cfg.live_top_db[b] : cfg.top_db[b];
+    view_bot_db = live ? cfg.live_bottom_db[b] : cfg.bottom_db[b];
 }
 
 /* There is no auto-range on either mode. Both use their own stored dB limits,
@@ -385,9 +390,9 @@ static void mask_mute_icon(unsigned right, unsigned cy) {
 
 static int level_of(unsigned code, unsigned h) {
     int db = (int)code / 2 - 84;
-    int range = (int)cfg.top_db - (int)cfg.bottom_db;
+    int range = view_top_db - view_bot_db;
     if (range < 5) range = 5;
-    int level = (db - (int)cfg.bottom_db) * (int)h / range;
+    int level = (db - view_bot_db) * (int)h / range;
     if (level < 0) level = 0;
     if (level > (int)h) level = (int)h;
     return level;
@@ -1034,7 +1039,7 @@ static void analyse(void) {
 
 static void stats_store(unsigned i) {
     if (i >= 36) return;
-    int lv = (pk_db - (cfg.bottom_db + 4)) * 100 / 50;
+    int lv = (pk_db - (view_bot_db + 4)) * 100 / 50;
     int ac = act_db * 100 / 60;
     int de = det_pct;
     if (lv < 0) lv = 0;
@@ -1118,11 +1123,12 @@ static void change_channel(int direction) {
 }
 
 static void adjust_limit(bool top, int direction) {
-    /* A chord only edits the pair for the mode on screen. Tuning LIVE can no
-     * longer move the SWEEP window, and vice versa. */
+    /* A chord only edits the pair for the band + mode on screen. Tuning LIVE
+     * on 5G cannot move 2.4G, SWEEP, or any other combination. */
+    unsigned b = scale_band();
     bool live = cfg.mode == UI_MODE_LIVE;
-    int8_t *hi = live ? &cfg.live_top_db : &cfg.top_db;
-    int8_t *lo = live ? &cfg.live_bottom_db : &cfg.bottom_db;
+    int8_t *hi = live ? &cfg.live_top_db[b] : &cfg.top_db[b];
+    int8_t *lo = live ? &cfg.live_bottom_db[b] : &cfg.bottom_db[b];
     int8_t *limit = top ? hi : lo;
     int value = *limit + (direction > 0 ? 5 : -5);
     if (top) {

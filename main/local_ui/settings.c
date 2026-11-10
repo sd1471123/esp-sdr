@@ -15,10 +15,12 @@ void ui_settings_defaults(ui_settings_t *s) {
     s->landscape = 1;
     s->buzz = 1;
     s->mute = 0;
-    s->top_db = -26;
-    s->bottom_db = -105;
-    s->live_top_db = -26;
-    s->live_bottom_db = -105;
+    for (unsigned b = 0; b < 2; b++) {
+        s->top_db[b] = -26;
+        s->bottom_db[b] = -105;
+        s->live_top_db[b] = -26;
+        s->live_bottom_db[b] = -105;
+    }
 }
 
 static void sanitize(ui_settings_t *s) {
@@ -27,12 +29,15 @@ static void sanitize(ui_settings_t *s) {
     if (s->landscape > 1) s->landscape = 1;
     if (s->buzz > 1) s->buzz = 1;
     if (s->mute > 1) s->mute = 1;
-    s->top_db = clamp_db(s->top_db, -80, -10);
-    s->bottom_db = clamp_db(s->bottom_db, -125, -55);
-    if (s->bottom_db > s->top_db - 30) s->bottom_db = s->top_db - 30;
-    s->live_top_db = clamp_db(s->live_top_db, -80, -10);
-    s->live_bottom_db = clamp_db(s->live_bottom_db, -125, -55);
-    if (s->live_bottom_db > s->live_top_db - 30) s->live_bottom_db = s->live_top_db - 30;
+    for (unsigned b = 0; b < 2; b++) {
+        s->top_db[b] = clamp_db(s->top_db[b], -80, -10);
+        s->bottom_db[b] = clamp_db(s->bottom_db[b], -125, -55);
+        if (s->bottom_db[b] > s->top_db[b] - 30) s->bottom_db[b] = s->top_db[b] - 30;
+        s->live_top_db[b] = clamp_db(s->live_top_db[b], -80, -10);
+        s->live_bottom_db[b] = clamp_db(s->live_bottom_db[b], -125, -55);
+        if (s->live_bottom_db[b] > s->live_top_db[b] - 30)
+            s->live_bottom_db[b] = s->live_top_db[b] - 30;
+    }
 }
 
 void ui_settings_load(ui_settings_t *s) {
@@ -46,14 +51,21 @@ void ui_settings_load(ui_settings_t *s) {
     if (nvs_get_u8(handle, "buzz", &v) == ESP_OK) s->buzz = v;
     if (nvs_get_u8(handle, "mute", &v) == ESP_OK) s->mute = v;
     int8_t d;
-    if (nvs_get_i8(handle, "top", &d) == ESP_OK) s->top_db = d;
-    if (nvs_get_i8(handle, "bot", &d) == ESP_OK) s->bottom_db = d;
-    /* Upgrading from a blob that had one shared pair: let LIVE inherit it, then
-     * override with the dedicated keys if they exist. */
-    s->live_top_db = s->top_db;
-    s->live_bottom_db = s->bottom_db;
-    if (nvs_get_i8(handle, "ltop", &d) == ESP_OK) s->live_top_db = d;
-    if (nvs_get_i8(handle, "lbot", &d) == ESP_OK) s->live_bottom_db = d;
+    /* Legacy keys held one pair per mode with no band dimension. They become
+     * the 5G pairs (the default band) so an upgrade keeps the current picture. */
+    if (nvs_get_i8(handle, "top", &d) == ESP_OK) s->top_db[UI_BAND_5G] = d;
+    if (nvs_get_i8(handle, "bot", &d) == ESP_OK) s->bottom_db[UI_BAND_5G] = d;
+    if (nvs_get_i8(handle, "ltop", &d) == ESP_OK) s->live_top_db[UI_BAND_5G] = d;
+    if (nvs_get_i8(handle, "lbot", &d) == ESP_OK) s->live_bottom_db[UI_BAND_5G] = d;
+    /* 2.4G starts from whatever 5G has, then its own keys take precedence. */
+    s->top_db[UI_BAND_24G] = s->top_db[UI_BAND_5G];
+    s->bottom_db[UI_BAND_24G] = s->bottom_db[UI_BAND_5G];
+    s->live_top_db[UI_BAND_24G] = s->live_top_db[UI_BAND_5G];
+    s->live_bottom_db[UI_BAND_24G] = s->live_bottom_db[UI_BAND_5G];
+    if (nvs_get_i8(handle, "top24", &d) == ESP_OK) s->top_db[UI_BAND_24G] = d;
+    if (nvs_get_i8(handle, "bot24", &d) == ESP_OK) s->bottom_db[UI_BAND_24G] = d;
+    if (nvs_get_i8(handle, "ltop24", &d) == ESP_OK) s->live_top_db[UI_BAND_24G] = d;
+    if (nvs_get_i8(handle, "lbot24", &d) == ESP_OK) s->live_bottom_db[UI_BAND_24G] = d;
     nvs_close(handle);
     sanitize(s);
 }
@@ -66,10 +78,14 @@ void ui_settings_save(const ui_settings_t *s) {
     nvs_set_u8(handle, "land", s->landscape);
     nvs_set_u8(handle, "buzz", s->buzz);
     nvs_set_u8(handle, "mute", s->mute);
-    nvs_set_i8(handle, "top", s->top_db);
-    nvs_set_i8(handle, "bot", s->bottom_db);
-    nvs_set_i8(handle, "ltop", s->live_top_db);
-    nvs_set_i8(handle, "lbot", s->live_bottom_db);
+    nvs_set_i8(handle, "top", s->top_db[UI_BAND_5G]);
+    nvs_set_i8(handle, "bot", s->bottom_db[UI_BAND_5G]);
+    nvs_set_i8(handle, "ltop", s->live_top_db[UI_BAND_5G]);
+    nvs_set_i8(handle, "lbot", s->live_bottom_db[UI_BAND_5G]);
+    nvs_set_i8(handle, "top24", s->top_db[UI_BAND_24G]);
+    nvs_set_i8(handle, "bot24", s->bottom_db[UI_BAND_24G]);
+    nvs_set_i8(handle, "ltop24", s->live_top_db[UI_BAND_24G]);
+    nvs_set_i8(handle, "lbot24", s->live_bottom_db[UI_BAND_24G]);
     nvs_commit(handle);
     nvs_close(handle);
 }
