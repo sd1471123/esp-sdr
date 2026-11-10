@@ -85,6 +85,9 @@ if(CONFIG_ESP_SDR_LOCAL_UI)
         "local_ui/buzzer.c"
         "local_ui/ui.c")
     list(APPEND ui_includes "local_ui")
+    if(CONFIG_ESP_SDR_PIN_PROBE)
+        list(APPEND ui_sources "local_ui/pin_probe.c")
+    endif()
 endif()
 
 idf_component_register(SRCS "${receiver}" ${sources} ${ui_sources}

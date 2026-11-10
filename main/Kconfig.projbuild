@@ -82,4 +82,14 @@ menu "ESP-SDR local UI"
             the other is idle. This locks the panel wiring to the board
             definitions in main/local_ui/board_c5_lcd.h.
 
+    config ESP_SDR_PIN_PROBE
+        bool "Header pin probe instead of the panel (diagnostic)"
+        depends on ESP_SDR_LOCAL_UI
+        default n
+        help
+            Skip the radio, the panel and the keys at boot and turn the
+            header into a buzzer keypad: ground a pin with a jumper and the
+            buzzer counts out its GPIO number. Used to settle a suspected
+            mis-silkscreened board or a swapped lead. Never package this.
+
 endmenu

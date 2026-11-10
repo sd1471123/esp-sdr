@@ -1,0 +1,3 @@
+# Diagnostic image: the header becomes a buzzer keypad. Flashed by hand only,
+# never shipped. Build with -B build_probe so the normal panel image survives.
+CONFIG_ESP_SDR_PIN_PROBE=y

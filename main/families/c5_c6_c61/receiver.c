@@ -38,6 +38,9 @@
 #include "rx_recalibration.h"
 #if CONFIG_ESP_SDR_LOCAL_UI
 #include "local_ui.h"
+#if CONFIG_ESP_SDR_PIN_PROBE
+#include "pin_probe.h"
+#endif
 #include "ui_backend.h"
 #endif
 extern void phy_stop_tx_tone(unsigned);
@@ -311,7 +314,9 @@ static void handle_command(char *line);
 static void handle_command_inner(char *line);
 
 void app_main(void) {
-
+#if CONFIG_ESP_SDR_PIN_PROBE
+    pin_probe_run(); /* diagnostic build: the radio and the panel never start */
+#endif
     esp_log_level_set("*", ESP_LOG_NONE);
     esp_err_t e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {

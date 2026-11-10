@@ -22,6 +22,36 @@
 
 改宏后重新编译即可，不用动杜邦线。
 
+## 引脚探针（查丝印、查按键接线）
+
+`esp32c5-lcd-pinprobe.bin` 是一个独立的小工程（源码在
+`main/local_ui/pin_probe.c`，用 `CONFIG_ESP_SDR_PIN_PROBE` 打开）。它不启动
+射频、不初始化屏幕、不读按键，只把所有排针 GPIO 设成上拉输入：拿一根 GND
+线去碰任意一个针，蜂鸣器把这个针的 **GPIO 号**报出来。
+
+只烧这一支，不碰 bootloader 和分区表：
+
+```bash
+python -m esptool --chip esp32c5 -p COM8 -b 460800 \
+  write-flash --flash-mode dio --flash-size 2MB --flash-freq 80m \
+  0x10000 esp32c5-lcd-pinprobe.bin
+```
+
+退回正常固件：重新烧 `esp32c5-lcd-full.bin` 即可。
+
+**报号规则**：400 ms 长音开头 → 十位（每声 160 ms）→ 停 600 ms → 个位。
+末尾单独一声 700 ms 长音表示 0。
+
+| 听到 | 是 |
+|---|---|
+| 2 声、停、4 声 | GPIO24 |
+| 6 声（中间不停） | GPIO6 |
+| 1 声、停、一声长音 | GPIO10 |
+| 一声长音 | GPIO0 |
+
+开机上电先响 3 声短音表示活着。如果开机什么都没碰就自己报号，说明那些脚在
+上电时就被短到 GND 了（按键那条公共地接错）。
+
 ## 背光电流（务必看）
 
 GMT032 模块的背光是 6 颗 LED，工作电流约 **90–95 mA**，远超单个 GPIO 的
@@ -40,6 +70,7 @@ GMT032 模块的背光是 6 颗 LED，工作电流约 **90–95 mA**，远超单
 | `esp32c5-lcd-partition-table.bin` | `0x8000` | 3072 | 分区表 |
 | `esp32c5-lcd-app.bin` | `0x10000` | 876016 | 应用，ST7789（占 1 MB 分区 84%） |
 | `esp32c5-lcd-app-ili9341.bin` | `0x10000` | 876336 | 应用，ILI9341 |
+| `esp32c5-lcd-pinprobe.bin` | `0x10000` | 143888 | 引脚探针，只烧应用，见下 |
 
 两个 `full` 镜像只差初始化序列。屏完全不出图时各烧一次，能出纯色就说明
 控制器型号对了，之后用对应版本即可。
