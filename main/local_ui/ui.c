@@ -102,7 +102,6 @@ static void trace(const char *fmt, ...) { (void)fmt; }
 #define COL_TINT_C  0x0967 /* cyan 16% on strip bg */
 #define COL_TINT_O  0x2924 /* amber 12% on panel */
 #define COL_TINT_G  0x1A25 /* green 12% on panel */
-#define COL_FILL    0x1081 /* dark amber wash under the peak — must stay near black */
 #define COL_USB     0x07FF
 #define COL_MUTE    0xF800
 
@@ -116,6 +115,10 @@ static void trace(const char *fmt, ...) { (void)fmt; }
 typedef struct {
     unsigned top_h, spec_y, spec_h, wf_y, wf_h, strip_y, strip_h;
 } layout_t;
+
+/* Defined with the channel strip below; the spectrum uses it so the selection
+ * box and the strip cursor land on exactly the same frequency column. */
+static unsigned strip_x(unsigned mhz, unsigned w);
 
 static ui_settings_t cfg;
 static layout_t layout;
@@ -149,7 +152,11 @@ static uint16_t *text_buf;
 static uint16_t wf_palette[256];
 static unsigned wf_next;
 
-static const uint16_t spec_palette[5] = {COL_SPEC_BG, COL_GRID, COL_TRACE, COL_PEAK, COL_FILL};
+/* lcd_draw_bitmap2() reads a 2-bit index, so only these four entries are
+ * reachable. A fifth "peak wash" colour used to sit at index 4 and was silently
+ * masked to 0 by mask_put(), which erased the grid under the peak band instead
+ * of tinting it. The band now shares the grid colour, the same near-black wash. */
+static const uint16_t spec_palette[4] = {COL_SPEC_BG, COL_GRID, COL_TRACE, COL_PEAK};
 static uint8_t ch_pk[36], ch_act[36], ch_det[36];
 static int8_t ch_pk_db[36], ch_act_db[36];
 static uint64_t ch_seen;    /* bit per channel with at least one capture */
@@ -576,7 +583,10 @@ static void render_spectrum(unsigned w) {
             if (y < 0) y = 0;
             int ph = (int)h - 1 - hold;
             if (ph < 0) ph = 0;
-            for (unsigned yy = (unsigned)ph; yy < h; yy++) mask_put(x, yy, 4);
+            /* Index 1, not 4: mask_put() keeps only two bits, so the old 4 was
+             * truncated to 0 and turned the peak band into a black eraser. The
+             * grid colour is the intended near-black wash. */
+            for (unsigned yy = (unsigned)ph; yy < h; yy++) mask_put(x, yy, 1);
             unsigned lo = (unsigned)(prev < 0 ? y : (prev < y ? prev : y));
             unsigned hi = (unsigned)(prev < 0 ? y : (prev > y ? prev : y));
             for (unsigned yy = lo; yy <= hi; yy++) mask_put(x, yy, 2);
@@ -604,6 +614,27 @@ static void render_spectrum(unsigned w) {
     snprintf(line, sizeof(line), "%u", hi_mhz);
     unsigned tw = text_w(line);
     mask_text(w - 4 - tw, h - FONT5X7_H - 3, line, 1);
+
+    /* Sweep (and host-linked views) show the whole band, so outline the 20 MHz
+     * window belonging to the selected channel — the box from the approved HTML
+     * mock. The 2-bit mask has no spare colour for its translucent fill, so only
+     * the two vertical edges and the bright top/bottom rules are drawn, in the
+     * amber peak colour (the curve already owns cyan). Painted before the
+     * callout so a channel at the far left cannot obscure the label. strip_x()
+     * is shared with the channel strip, which keeps this box aligned with the
+     * cursor underneath. */
+    if (cfg.mode == UI_MODE_SWEEP || usb_active) {
+        unsigned x0 = strip_x(shown >= 10 ? shown - 10 : 0, w);
+        unsigned x1 = strip_x(shown + 10, w);
+        if (x0 >= w) x0 = w - 1;
+        if (x1 >= w) x1 = w - 1;
+        if (x1 < x0) { unsigned t = x0; x0 = x1; x1 = t; }
+        if (x1 - x0 < 2) x1 = (x0 + 2 < w) ? x0 + 2 : w - 1;
+        mask_rect(x0, 0, 1, h, 3);
+        mask_rect(x1, 0, 1, h, 3);
+        mask_rect(x0, 0, x1 - x0 + 1, 1, 3);
+        mask_rect(x0, h - 1, x1 - x0 + 1, 1, 3);
+    }
 
     if (cfg.mode == UI_MODE_LIVE) {
         unsigned cx = w / 2;
