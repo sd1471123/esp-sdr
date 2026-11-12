@@ -95,11 +95,15 @@ jobs:
           path: downloaded-firmware
           merge-multiple: false
       - name: Collect firmware and combined manifest
-        run: python3 tools/collect_firmware.py --input downloaded-firmware --output firmware --catalog firmware-targets.json
+        # The collector refuses to write into an existing folder, so a release
+        # can never mix with older images. This branch keeps its LCD panel
+        # binaries in firmware/, so collect into a scratch folder instead of
+        # clearing files out of the checkout.
+        run: python3 tools/collect_firmware.py --input downloaded-firmware --output "$RUNNER_TEMP/firmware" --catalog firmware-targets.json
       - name: Upload complete firmware set
         uses: actions/upload-artifact@v4
         with:
           name: esp-sdr-firmware
-          path: firmware/
+          path: ${{ runner.temp }}/firmware/
           if-no-files-found: error
           retention-days: 90
