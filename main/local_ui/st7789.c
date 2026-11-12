@@ -29,9 +29,18 @@
  * sram_guard.ld assertion stops the link. The registers below do the same job in
  * a few writes and add no static data at all.
  *
- * 13-bit resolution at 5 kHz: 80 MHz / (500/256) / 8192 = 5000.0 Hz exactly, so
- * the divider is the exact Q10.8 value and there is no frequency error. 5 kHz is
- * far above visible flicker and above the audible band. */
+ * 13-bit at 5 kHz: 80 MHz / (500/256) / 8192 = 5000.0 Hz exactly, so both the
+ * divider and the frequency are exact.
+ *
+ * Do not raise this casually. Mid duties (25-75 %) make the 90 mA LED pulses
+ * modulate the 3V3 rail, and the panel's VCOM rides on that rail, so a slow
+ * "water ripple" of horizontal bands drifts across the glass. 40 kHz / 10-bit
+ * was tried and did not clear it: the panel scans a line every ~69 us, so even
+ * at 40 kHz a row only averages 2.8 PWM periods. Going further needs a MOSFET
+ * in place of the S8050 (its 1-2 us storage time destroys narrow pulses) plus
+ * bulk capacitance on the rail, which is hardware work, not a register change.
+ * For now the UI only exposes 10 % and 100 %, the two duties that measured
+ * clean. */
 #define BL_CHANNEL   0
 #define BL_TIMER     0
 #define BL_DUTY_BITS 13
@@ -85,13 +94,14 @@ static void backlight_pwm_init(void) {
     esp_rom_gpio_connect_out_signal(LCD_PIN_BL, LEDC_LS_SIG_OUT0_IDX + BL_CHANNEL, false, false);
 
     /* Prove the timer is actually running before trusting it. The sample gap has
-     * to be a NON-multiple of the PWM period: at 5 kHz the period is exactly
-     * 200 us, so a 400 us gap lands on the same counter value every time and a
-     * perfectly healthy timer looks dead. 137 us is 0.685 of a period, i.e. the
-     * counter must advance by ~5600 of its 8192 steps. Two equal samples
-     * therefore really do mean the block has no clock. Rather than ship a black
-     * screen, hand the pin back to a plain GPIO and run at full brightness — the
-     * pre-PWM behaviour — so the UI is always readable. */
+     * to be a NON-multiple of the PWM period: the first build sampled 400 us
+     * apart at 5 kHz, which is exactly two periods, so the counter came back to
+     * the same value every time and a perfectly healthy timer looked dead. 137 us
+     * is 0.685 of a period here, and it is not a whole number of periods at any
+     * of the frequencies this file has been tried at. Two equal samples therefore
+     * really do mean the block has no clock. Rather than ship a black screen, hand
+     * the pin back to a plain GPIO and run at full brightness — the pre-PWM
+     * behaviour — so the UI is always readable. */
     uint32_t cnt_a = tg->timer[BL_TIMER].value.timern_cnt;
     esp_rom_delay_us(137);
     uint32_t cnt_b = tg->timer[BL_TIMER].value.timern_cnt;

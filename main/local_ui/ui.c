@@ -1307,12 +1307,13 @@ static void adjust_limit(bool top, int direction) {
     buzzer_play(top ? UI_BUZZ_TOP : UI_BUZZ_BOTTOM);
 }
 
-/* Backlight presets, chord: hold the rotary knob, then LEFT/RIGHT. The list is
- * stepped through in order and wraps at both ends, so from 100 % a tap to the
- * right drops to 10 % instead of sticking at the top. The floor is 10 % rather
- * than 0: with the panel fully dark there is no way to tell a dimmed screen from
- * a dead one, and the 10 % step is still dark enough for a pitch-black room. */
-static const uint8_t k_bright[] = {10, 25, 50, 75, 100};
+/* Backlight presets, chord: hold the rotary knob, then LEFT/RIGHT. Only two
+ * steps are exposed. 5 kHz PWM at 25-75 % puts drifting horizontal bands on this
+ * glass (the 90 mA LED pulses modulate the rail the panel's VCOM sits on), and
+ * neither a higher switching frequency nor a finer resolution cleared them; the
+ * two ends of the range are the duties that measured clean. Either direction
+ * toggles, so a tap always gets you to the other one. */
+static const uint8_t k_bright[] = {10, 100};
 #define BRIGHT_STEPS (sizeof(k_bright) / sizeof(k_bright[0]))
 
 static void adjust_brightness(int direction) {

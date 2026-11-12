@@ -30,17 +30,11 @@ static void sanitize(ui_settings_t *s) {
     if (s->landscape > 1) s->landscape = 1;
     if (s->buzz > 1) s->buzz = 1;
     if (s->mute > 1) s->mute = 1;
-    /* Only the presets the chord can reach are valid; anything else in NVS (an
-     * old image, a bad write) snaps to the nearest one instead of dimming the
-     * panel to an arbitrary level. A stored 0 from the first PWM build is
-     * floored to 10 % on purpose: booting into a black screen looks exactly like
-     * a bricked board. */
-    static const uint8_t bright_steps[] = {10, 25, 50, 75, 100};
-    uint8_t near = bright_steps[0];
-    for (unsigned i = 0; i < sizeof(bright_steps); i++) {
-        if (s->bright + 12 >= bright_steps[i]) near = bright_steps[i];
-    }
-    s->bright = near;
+    /* Only the two presets the chord can reach are valid; anything else in NVS
+     * (an old image, a bad write) snaps to the nearer one. A stored 0 from the
+     * first PWM build lands on 10 % on purpose: booting into a black screen looks
+     * exactly like a bricked board. */
+    s->bright = s->bright >= 55 ? 100 : 10;
     for (unsigned b = 0; b < 2; b++) {
         s->top_db[b] = clamp_db(s->top_db[b], -80, -10);
         s->bottom_db[b] = clamp_db(s->bottom_db[b], -125, -55);
