@@ -113,9 +113,24 @@ static void prepare_rx(void) {
         gain_defaults_saved = false;
     }
 #endif
-    if (calibrated_mhz != frequency_mhz || rx_recalibration_stale()) {
-        rx_recalibrate(frequency_mhz);
-        calibrated_mhz = frequency_mhz;
+    /* A full rx_recalibrate() re-measures the DC offset for every gain
+     * interpolation bin and costs tens of milliseconds on the C5 — more than the
+     * capture itself, and it was the real ceiling on the sweep rate. The sweep
+     * moves in 20 MHz steps, where that offset barely changes, so recalibrate
+     * only on a wide jump (band/mode change, host retune), when something asked
+     * for it explicitly, or every 8th step; otherwise just move the PLL. */
+    static unsigned cal_skip;
+    if (calibrated_mhz != frequency_mhz) {
+        unsigned diff = frequency_mhz > calibrated_mhz ? frequency_mhz - calibrated_mhz
+                                                       : calibrated_mhz - frequency_mhz;
+        bool force = rx_recalibration_stale() || diff > 40 || cal_skip >= 7;
+        if (force) {
+            rx_recalibrate(frequency_mhz);
+            calibrated_mhz = frequency_mhz;
+            cal_skip = 0;
+        } else {
+            cal_skip++;
+        }
     }
 #if CONFIG_IDF_TARGET_ESP32C5
     phy_chip_set_chan(frequency_mhz, rx_channel_mode);

@@ -107,15 +107,15 @@ static void trace(const char *fmt, ...) { (void)fmt; }
 
 /* Minimum spacing between two sweep captures.
  *
- * This used to be 80 ms, which was the real limit on how fast a band pass could
- * run: the RF part of a step takes about 15 ms, so two thirds of every step was
- * pure waiting. The renderer is the other constraint — it owns the CPU for
- * ~135 ms per frame, so the number of capture slots inside a frame decides the
- * achievable rate. The waterfall now offers one every 16 rows again, which
- * brings a frame to ~11 slots, and the spacing below is what separates them.
- * 30 ms keeps a comfortable margin over the ~15 ms the RF needs to settle.
+ * Measured on hardware: the RF side of a step costs 1-2 ms (prepare_rx, retune,
+ * adc trigger and the sentinel check), so this constant is not protecting the
+ * radio — it only paces the capture slots the renderer offers. Those slots sit
+ * about 10 ms apart inside the waterfall, so the previous 80 ms and even 30 ms
+ * values threw away most of them: a step ended up waiting for the slot grid
+ * instead of for the radio. Keep this below the slot spacing so nearly every
+ * slot captures.
  */
-#define SWEEP_PERIOD_US  30000
+#define SWEEP_PERIOD_US  5000
 /* A frame is ~134 KB: ~270 ms at 4 MHz, ~135 ms at 8 MHz. Asking for less than
  * the frame time made render() start the next frame the instant it returned, so
  * the panel never got a still picture and the write seam never stopped moving.
@@ -176,6 +176,10 @@ static uint16_t ch_hits[36], sweeps;
 static uint8_t *win_peak; /* peak hold of the 20 MHz window on screen (heap) */
 static uint8_t last_tuned;         /* channel whose window is on screen */
 static uint8_t col_seen[40];        /* bitmap: band column covered by this sweep */
+static unsigned last_acq_ms;        /* whole-step cost of the most recent capture */
+static unsigned last_frame_ms;      /* wall time of the most recent repaint */
+static unsigned acq_ok, acq_fail;   /* capture attempts vs. successful ones */
+static unsigned sweep_step_count;   /* monotonic, so the tick can report a true rate */
 
 /* Vertical scale, as in the phone app: a 70 dB window anchored on the noise floor
  * (floor + 55) or on the strongest peak, attack 0.4 / release 0.06 per capture. */
@@ -731,11 +735,13 @@ static void render_waterfall(unsigned w) {
             wf_line[x] = wf_palette[idx];
         }
         lcd_pixels_cont(wf_line, w);
-        if ((r & 7) == 7) pump_buttons();
-        /* A capture slot every 16 rows. The ring index is frozen for this frame,
-         * so a capture landing here cannot shift the rows underneath us; at most
-         * the single row it just pushed in shows up early. */
-        if ((r & 15) == 15) maybe_acquire();
+        if ((r & 7) == 7) {
+            pump_buttons();
+            /* Capture slot every 8 rows: that is roughly every 5 ms of bus time,
+             * denser than the old 16-row grid so the sweep is limited by the
+             * radio (1-2 ms) rather than by how rarely the renderer looks up. */
+            maybe_acquire();
+        }
     }
     lcd_pixels_end();
 }
@@ -938,6 +944,7 @@ static void render_overlays(unsigned w) {
 }
 
 static void render(void) {
+    int64_t t_frame = esp_timer_get_time();
     unsigned w = lcd_width();
     layout_build();
     pump_buttons();
@@ -957,9 +964,8 @@ static void render(void) {
     maybe_acquire();
     render_strip(w);
     render_overlays(w);
-    /* The waterfall no longer offers capture slots (they made its rows shift
-     * mid-frame), so give the RF engine one more chance at the tail. */
     maybe_acquire();
+    last_frame_ms = (unsigned)((esp_timer_get_time() - t_frame) / 1000);
 }
 
 /* Publish the channel bars when a pass ends, using the phone app's rules: the
@@ -1028,24 +1034,32 @@ static void waterfall_push(void) {
 }
 
 static void analyse(void) {
-    uint8_t sorted[FFT_BINS];
-    memcpy(sorted, codes, sizeof(sorted));
-    for (unsigned i = 1; i < FFT_BINS; i++) {
-        uint8_t v = sorted[i];
-        unsigned j = i;
-        while (j && sorted[j - 1] > v) {
-            sorted[j] = sorted[j - 1];
-            j--;
-        }
-        sorted[j] = v;
-    }
-    unsigned noise = sorted[FFT_BINS / 4];
-    unsigned sum = 0, pk = 0, det = 0;
+    /* Counting sort over the 8-bit codes. The old insertion sort was O(n^2) on
+     * 256 entries — up to ~32k compares per step — and this runs on every capture.
+     * hist lives on the stack: a static copy pushed BSS into the C5 RF dump
+     * window at 0x40830000 and the linker rejects that outright. Counts saturate
+     * at 255, which cannot happen with 256 bins unless every bin is identical. */
+    uint8_t hist[256];
+    memset(hist, 0, sizeof(hist));
+    unsigned sum = 0, pk = 0;
     for (unsigned j = 0; j < FFT_BINS; j++) {
+        if (hist[codes[j]] < 255) hist[codes[j]]++;
         sum += codes[j];
         if (codes[j] > pk) pk = codes[j];
-        if (codes[j] > noise + 16) det++;
     }
+    unsigned noise = 0, acc = 0;
+    const unsigned target = FFT_BINS / 4;
+    for (unsigned i = 0; i < 256; i++) {
+        acc += hist[i];
+        if (acc > target) {
+            noise = i;
+            break;
+        }
+    }
+    unsigned det = 0;
+    for (unsigned j = 0; j < FFT_BINS; j++)
+        if (codes[j] > noise + 16) det++;
+
     pk_db = (int)(pk / 2) - 84;
     act_db = ((int)(sum / FFT_BINS) - (int)noise) / 2;
     det_pct = (int)(det * 100 / FFT_BINS);
@@ -1071,35 +1085,52 @@ static void stats_store(unsigned i) {
 }
 
 static void acquire(void) {
+    int64_t t_start = esp_timer_get_time();
     unsigned w = lcd_width();
     bool sweep = cfg.mode == UI_MODE_SWEEP;
     unsigned mhz = sweep ? sweep_lo(scan_index) : band_mhz(channel);
     unsigned elapsed = 0;
-    if (!sdr_ui_spectrum(mhz, FFT_BINS, sweep ? RATE_SWEEP : RATE_CODE, codes, &elapsed)) return;
+    if (!sdr_ui_spectrum(mhz, FFT_BINS, sweep ? RATE_SWEEP : RATE_CODE, codes, &elapsed)) {
+        acq_fail++;
+        return;
+    }
+    acq_ok++;
     have_data = true;
 
     if (sweep) {
         /* Keep only the +/-10..20 MHz ring of an 80 MS/s capture, like the app: the
-         * DC region around the LO is skipped and a neighbouring step covers it. */
+         * DC region around the LO is skipped and a neighbouring step covers it.
+         *
+         * Averaging happens in the code (dB) domain. The old version accumulated
+         * linear power with one powf() per bin and then ran log10f() over all 320
+         * columns, i.e. 576 libm calls per step; measured on hardware a step cost
+         * 36 ms while the RF part is only 1-2 ms, so those calls were the sweep's
+         * real limit. Averaging codes needs neither function, and on noise the two
+         * agree within a fraction of a dB (isolated peaks come out ~1 dB high). */
         const float df = 80.0f / (float)FFT_BINS;
+        unsigned col_lo = w, col_hi = 0;
         for (unsigned j = 0; j < FFT_BINS; j++) {
             float rel = ((float)j - (float)FFT_BINS / 2.0f) * df;
             float a = rel < 0 ? -rel : rel;
             if (a < 10.0f || a > 20.0f) continue;
             int col = column_of_f((float)mhz + rel, w);
             if (col < 0) continue;
-            col_seen_set((unsigned)col);
-            if (spec_sum) spec_sum[col] += powf(10.0f, ((float)codes[j] * 0.5f - 84.0f) * 0.1f);
-            if (spec_cnt) spec_cnt[col]++;
-            if (codes[j] >= band_peak[col]) band_peak[col] = codes[j];
+            unsigned uc = (unsigned)col;
+            if (uc < col_lo) col_lo = uc;
+            if (uc > col_hi) col_hi = uc;
+            col_seen_set(uc);
+            if (spec_sum) spec_sum[uc] += (float)codes[j];
+            if (spec_cnt) spec_cnt[uc]++;
+            if (codes[j] >= band_peak[uc]) band_peak[uc] = codes[j];
         }
-        if (spec_sum && spec_cnt)
-            for (unsigned x = 0; x < w; x++) {
+        /* Only the columns this capture touched can have changed. Recomputing all
+         * 320 of them every step was most of the remaining cost. */
+        if (spec_sum && spec_cnt && col_lo <= col_hi)
+            for (unsigned x = col_lo; x <= col_hi; x++) {
                 if (!spec_cnt[x]) continue;
-                float avg = 10.0f * log10f(spec_sum[x] / (float)spec_cnt[x]);
-                int v = (int)((avg + 84.0f) * 2.0f + 0.5f);
-                band_codes[x] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+                band_codes[x] = (uint8_t)(spec_sum[x] / (float)spec_cnt[x] + 0.5f);
             }
+        sweep_step_count++;
         if (++scan_index >= sweep_steps()) {
             /* pass finished: drop PEAK_DECAY_DB (2 dB = 4 codes) from the hold and
              * publish the bars for the sweep that just ended */
@@ -1126,7 +1157,8 @@ static void acquire(void) {
     }
     analyse();
     waterfall_push();
-    (void)elapsed;
+    /* Whole-step cost (RF + spectrum accumulation + sort), not just the RF part. */
+    last_acq_ms = (unsigned)((esp_timer_get_time() - t_start) / 1000);
 }
 
 static void change_channel(int direction) {
@@ -1247,9 +1279,12 @@ static void reset_defaults(void) {
 static void toggle_mute(void) {
     muted = !muted;
     cfg.mute = muted ? 1 : 0;
+    /* Both directions go through here, so muting and un-muting are both written
+     * to NVS and both survive a reboot. */
     ui_settings_save(&cfg);
     buzzer_enable(!muted);
     if (!muted) buzzer_play(UI_BUZZ_CHANNEL);
+    trace("MUTE %d buzz=%d\n", (int)muted, (int)(cfg.buzz != 0 && !muted));
 }
 
 static void handle_events(const ui_button_event_t *event) {
@@ -1345,10 +1380,20 @@ static void ui_task(void *arg) {
              * the top of the next pass, so it still lands within ~10 ms. */
         }
         if (now - last_tick >= 2000000) {
+            /* Report steps per interval inside the firmware: the UART drops lines
+             * at 2 Mbaud, so a host-side diff of scan= is not trustworthy. */
+            static unsigned prev_steps;
+            static int64_t prev_tick;
+            unsigned steps = sweep_step_count - prev_steps;
+            unsigned dms = (unsigned)((now - prev_tick) / 1000);
+            prev_steps = sweep_step_count;
+            prev_tick = now;
             last_tick = now;
-            trace("UI tick host=%d ch=%u scan=%u/%u pk=%d act=%d fl=%d top=%d bot=%d free=%u\n",
+            trace("UI tick host=%d ch=%u scan=%u/%u steps=%u in %ums pk=%d act=%d fl=%d "
+                  "acq=%ums frame=%ums ok=%u fail=%u free=%u\n",
                   (int)usb_active, (unsigned)channel, (unsigned)scan_index + 1, sweep_steps(),
-                  pk_db, act_db, floor_db_seen, view_top_db, view_bot_db,
+                  steps, dms,
+                  pk_db, act_db, floor_db_seen, last_acq_ms, last_frame_ms, acq_ok, acq_fail,
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
         }
         vTaskDelay(pdMS_TO_TICKS(10));
