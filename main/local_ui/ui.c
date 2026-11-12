@@ -804,9 +804,12 @@ static unsigned strip_x(unsigned mhz, unsigned w) {
     return x > w ? w : x;
 }
 
+/* Two rows of bars, in the phone app's order: activity (how strong right now)
+ * on top, detection (how often occupied) underneath. The colour ramp belongs to
+ * the activity row, the detection row is a flat cyan share. */
 #define STRIP_LABEL_Y (layout.strip_y + 2)
-#define STRIP_DET_Y   (layout.strip_y + 11)
-#define STRIP_ACT_Y   (layout.strip_y + 20)
+#define STRIP_ACT_Y   (layout.strip_y + 11)
+#define STRIP_DET_Y   (layout.strip_y + 20)
 #define STRIP_BAR_H   7
 
 /* 5 GHz channels never overlap (all 20 MHz apart), so a bar can sit on the
@@ -847,16 +850,18 @@ static void strip_draw_bar(unsigned i, bool sel) {
     unsigned det = ch_det[i] > 100 ? 100 : ch_det[i];
     unsigned act = ch_act[i] > 100 ? 100 : ch_act[i];
 
-    lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, sel ? COL_TINT_C : 0x18C3);
-    if (det > 2) {
-        unsigned bw = slot * det / 100;
-        uint16_t dc = ch_pk[i] > 70 ? COL_RED : ch_pk[i] > 40 ? COL_PEAK : COL_GREEN;
-        lcd_fill_rect(x0, STRIP_DET_Y, bw ? bw : 1, STRIP_BAR_H, dc);
-    }
     lcd_fill_rect(x0, STRIP_ACT_Y, slot, STRIP_BAR_H, sel ? COL_TINT_C : 0x1082);
     if (act > 2) {
         unsigned bw = slot * act / 100;
-        lcd_fill_rect(x0, STRIP_ACT_Y, bw ? bw : 1, STRIP_BAR_H, COL_USB);
+        /* Same three colours the peak used to carry: below the 12 dB detection
+         * threshold is green, 12-30 dB amber, anything stronger red. */
+        uint16_t ac = ch_act_db[i] < 12 ? COL_GREEN : ch_act_db[i] < 30 ? COL_PEAK : COL_RED;
+        lcd_fill_rect(x0, STRIP_ACT_Y, bw ? bw : 1, STRIP_BAR_H, ac);
+    }
+    lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, sel ? COL_TINT_C : 0x18C3);
+    if (det > 2) {
+        unsigned bw = slot * det / 100;
+        lcd_fill_rect(x0, STRIP_DET_Y, bw ? bw : 1, STRIP_BAR_H, COL_USB);
     }
 }
 
@@ -871,16 +876,16 @@ static void strip_draw_gap_bars(void) {
         unsigned slot = x1 - x0;
         unsigned det = gap_det[g] > 100 ? 100 : gap_det[g];
         unsigned act = gap_act[g] > 100 ? 100 : gap_act[g];
-        lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, 0x18A1);
-        if (det > 2) {
-            unsigned bw = slot * det / 100;
-            uint16_t dc = gap_pk[g] > 70 ? COL_RED : gap_pk[g] > 40 ? COL_PEAK : COL_GREEN;
-            lcd_fill_rect(x0, STRIP_DET_Y, bw ? bw : 1, STRIP_BAR_H, dc);
-        }
         lcd_fill_rect(x0, STRIP_ACT_Y, slot, STRIP_BAR_H, 0x10A1);
         if (act > 2) {
             unsigned bw = slot * act / 100;
-            lcd_fill_rect(x0, STRIP_ACT_Y, bw ? bw : 1, STRIP_BAR_H, COL_USB);
+            uint16_t ac = gap_pk[g] < 12 ? COL_GREEN : gap_pk[g] < 30 ? COL_PEAK : COL_RED;
+            lcd_fill_rect(x0, STRIP_ACT_Y, bw ? bw : 1, STRIP_BAR_H, ac);
+        }
+        lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, 0x18A1);
+        if (det > 2) {
+            unsigned bw = slot * det / 100;
+            lcd_fill_rect(x0, STRIP_DET_Y, bw ? bw : 1, STRIP_BAR_H, COL_USB);
         }
     }
 }

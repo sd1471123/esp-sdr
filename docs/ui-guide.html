@@ -221,18 +221,9 @@ const act = c => {
 };
 // the detection bar is coloured by the channel peak, not by the percentage:
 // above -49 dBm-ish red, above -64 amber, otherwise green (mask code 70 / 40)
-const freqOf = c => c <= 64 ? 5180 + (c - 36) / 4 * 20
-  : c === 96 ? 5480
-  : c <= 144 ? 5500 + (c - 100) / 4 * 20
-  : c <= 165 ? 5745 + (c - 149) * 5
-  : 5845 + (c - 169) * 5;
-const pkOf = c => {
-  const f = freqOf(c);
-  let best = -96;
-  for (const [cc, pp] of chans) if (Math.abs(f - cc) < 12) best = Math.max(best, pp);
-  return best;
-};
-const barColor = v => v > -49 ? C.red : v > -64 ? C.peak : C.green;
+// activity (top row) carries the colour ramp, on dB above the noise floor:
+// the firmware stores ch_act as dB*100/60, so 100 % == 60 dB
+const actColor = pct => pct * 0.6 < 12 ? C.green : pct * 0.6 < 30 ? C.peak : C.red;
 
 // selected cell tint
 const sel = slots.find(s => s.c === 104);
@@ -240,12 +231,13 @@ ta('rect', { x: sel.x0, y: 2, width: sel.x1 - sel.x0 + 1, height: 27, fill: C.ti
 
 slots.forEach(s => {
   const w = Math.max(1, s.x1 - s.x0);
-  ta('rect', { x: s.x0, y: 11, width: w, height: 7, fill: '#1a1a1a' });
-  ta('rect', { x: s.x0, y: 20, width: w, height: 7, fill: '#121212' });
-  const dw = Math.max(1, Math.round(w * det(s.c) / 100));
+  // same order as the phone app: activity on top, detection underneath
+  ta('rect', { x: s.x0, y: 11, width: w, height: 7, fill: '#121212' });
+  ta('rect', { x: s.x0, y: 20, width: w, height: 7, fill: '#1a1a1a' });
   const aw = Math.max(1, Math.round(w * act(s.c) / 100));
-  ta('rect', { x: s.x0, y: 11, width: dw, height: 7, fill: barColor(pkOf(s.c)) });
-  ta('rect', { x: s.x0, y: 20, width: aw, height: 7, fill: C.cyan });
+  const dw = Math.max(1, Math.round(w * det(s.c) / 100));
+  ta('rect', { x: s.x0, y: 11, width: aw, height: 7, fill: actColor(act(s.c)) });
+  ta('rect', { x: s.x0, y: 20, width: dw, height: 7, fill: C.cyan });
 });
 // labels where they fit
 slots.forEach(s => {
@@ -259,13 +251,12 @@ slots.forEach(s => {
 gaps.forEach(gp => {
   const x0 = Math.round(px(gp.lo)), x1 = Math.round(px(gp.hi));
   const w = Math.max(1, x1 - x0);
-  ta('rect', { x: x0, y: 11, width: w, height: 7, fill: '#1f1c12' });
-  ta('rect', { x: x0, y: 20, width: w, height: 7, fill: '#141208' });
+  ta('rect', { x: x0, y: 11, width: w, height: 7, fill: '#141208' });
+  ta('rect', { x: x0, y: 20, width: w, height: 7, fill: '#1f1c12' });
   const dv = gp.tag === 'SAT' ? 26 : gp.tag === 'R' ? 48 : 8;
-  const dvc = gp.tag === 'SAT' ? C.green : gp.tag === 'R' ? C.peak : C.green;
   const av = gp.tag === 'SAT' ? 44 : gp.tag === 'R' ? 30 : 10;
-  ta('rect', { x: x0, y: 11, width: Math.max(1, Math.round(w * dv / 100)), height: 7, fill: dvc });
-  ta('rect', { x: x0, y: 20, width: Math.max(1, Math.round(w * av / 100)), height: 7, fill: C.cyan });
+  ta('rect', { x: x0, y: 11, width: Math.max(1, Math.round(w * av / 100)), height: 7, fill: actColor(av) });
+  ta('rect', { x: x0, y: 20, width: Math.max(1, Math.round(w * dv / 100)), height: 7, fill: C.cyan });
   if (gp.tag) {
     const tw = gp.tag.length * 6 - 1;
     if (tw + 2 <= w) {
