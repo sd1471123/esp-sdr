@@ -904,15 +904,22 @@ static void strip_draw_labels(unsigned w) {
         last = (unsigned)(lx + (int)tw);
         first = false;
     }
-    /* Purpose labels for the special stretches. A 20 MHz slot is ~8 px wide, far
-     * too narrow for five characters, so only wide stretches get text; the rest
-     * keep just their bars. */
+    /* Purpose labels for the special stretches. A 5 GHz stretch is often only a
+     * few pixels wide — 20 MHz of 725 MHz is ~9 px, and "RADAR" needs 29 px — so
+     * the word is replaced by its initial when the full one cannot fit. A 2 px
+     * sliver (the 5730-5735 ISM gap) cannot hold even one glyph and keeps bars
+     * only. */
     for (unsigned g = 0; g < gap_count(); g++) {
         unsigned x0 = strip_x(gap_lo(g), w), x1 = strip_x(gap_hi(g), w);
         if (x1 <= x0) continue;
+        char initial[2] = {gap_tag(g)[0], 0};
         const char *tag = gap_tag(g);
         unsigned tw = text_w(tag);
-        if (tw + 3 > x1 - x0) continue;
+        if (tw + 3 > x1 - x0) {
+            tag = initial;
+            tw = text_w(tag);
+            if (tw + 2 > x1 - x0) continue;
+        }
         int lx = (int)((x0 + x1) / 2) - (int)(tw / 2);
         if (lx < 1) lx = 1;
         if (lx + (int)tw > (int)w - 1) lx = (int)w - 1 - (int)tw;
