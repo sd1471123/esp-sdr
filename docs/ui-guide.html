@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>ESP32-C5 LCD panel — numbered interface guide</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #f4f5f7; }
+  #wrap { width: 1260px; }
+  svg { display: block; }
+</style>
+<div id="wrap">
+<svg id="g" viewBox="0 0 420 340" width="1260" height="1020" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .lbl { font: 700 9px "Segoe UI", Arial, sans-serif; }
+      .num { font: 700 10px "Segoe UI", Arial, sans-serif; fill: #0b0d10; }
+      .band { font: 700 8px "Consolas", monospace; fill: #e8edf4; }
+      .dim { font: 6px "Consolas", monospace; fill: #5a6573; }
+      .small { font: 6px "Consolas", monospace; }
+      .badge { fill: #ffb347; stroke: #f4f5f7; stroke-width: 1.5; }
+    </style>
+  </defs>
+  <g id="panel"></g>
+  <g id="notes"></g>
+</svg>
+</div>
+<script>
+const OX = 55, OY = 50;          // panel origin in guide space
+const W = 320, H = 240;
+const TOP = 30, SPEC_Y = 30, SPEC_H = 94, WF_Y = 124, WF_H = 84, STRIP_Y = 208;
+const C = {
+  bg: '#000000', panel: '#080c10', grid: '#101418', dim: '#5a6573',
+  muted: '#b9c3d3', text: '#e8edf4', accent: '#00c8ff', trace: '#00d4ff',
+  peak: '#ffb347', green: '#6ef0b0', red: '#ff6b6b', tint: '#06222e',
+  cyan: '#00ffff'
+};
+
+const BAND_LO = 5170, BAND_HI = 5895, SPAN = BAND_HI - BAND_LO;
+const TOP_DB = -26, BOT_DB = -105, RANGE = TOP_DB - BOT_DB;
+
+const px = f => (f - BAND_LO) / SPAN * W;
+const yd = db => SPEC_H - (db - BOT_DB) / RANGE * SPEC_H;
+
+// ---- synthetic 5 GHz sweep, deterministic so the PNG is stable -------------
+const chans = [
+  [5180, -62, 9], [5200, -73, 8], [5220, -80, 8], [5240, -57, 10],
+  [5260, -84, 7], [5280, -87, 7], [5300, -82, 8], [5320, -88, 7],
+  [5500, -65, 9], [5520, -75, 8], [5540, -86, 7], [5560, -89, 6],
+  [5580, -87, 7], [5600, -90, 6], [5620, -91, 6], [5640, -90, 6],
+  [5660, -91, 6], [5680, -92, 6], [5700, -91, 6], [5720, -89, 6],
+  [5745, -54, 11], [5765, -72, 8], [5785, -62, 10], [5805, -80, 8],
+  [5825, -76, 8], [5845, -84, 7], [5865, -87, 7], [5885, -90, 6]
+];
+function level(f) {
+  let v = -96 + 1.6 * Math.sin(f * 0.9) + 1.1 * Math.sin(f * 0.31);
+  for (const [c, p, w] of chans) {
+    const d = (f - c) / w;
+    if (Math.abs(d) < 3) v = Math.max(v, p - 6.5 * d * d - 0.4);
+  }
+  // satellite active sensing: one continuous broad shoulder, no channelisation
+  if (f > 5350 && f < 5470) {
+    const e = Math.min((f - 5350) / 12, (5470 - f) / 12, 1);
+    v = Math.max(v, -89 - 1.2 + 1.2 * e + 0.7 * Math.sin(f * 0.7));
+  }
+  // radar pulse just below 5350
+  if (Math.abs(f - 5340) < 7) v = Math.max(v, -80 - 1.4 * Math.abs(f - 5340));
+  return v;
+}
+
+const panel = document.getElementById('panel');
+const notes = document.getElementById('notes');
+const el = (n, a, t) => {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', n);
+  for (const k in a) e.setAttribute(k, a[k]);
+  if (t != null) e.textContent = t;
+  panel.appendChild(e);
+  return e;
+};
+const g = el('g', { transform: `translate(${OX},${OY})` });
+const add = (n, a, t) => {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', n);
+  for (const k in a) e.setAttribute(k, a[k]);
+  if (t != null) e.textContent = t;
+  g.appendChild(e);
+  return e;
+};
+
+// bezel + screen
+add('rect', { x: -3, y: -3, width: W + 6, height: H + 6, rx: 3, fill: '#1b1f24' });
+add('rect', { x: 0, y: 0, width: W, height: H, fill: C.bg });
+
+// ---- top bar ---------------------------------------------------------------
+add('rect', { x: 0, y: 0, width: W, height: TOP, fill: C.panel });
+add('rect', { x: 0, y: TOP - 1, width: W, height: 1, fill: C.bg });
+add('text', { x: 4, y: 20, class: 'band', style: 'font-size:11px' }, '5G');
+const pillX = 4 + 15 + 5;
+add('rect', { x: pillX, y: 5, width: 46, height: 20, fill: '#2924', stroke: C.peak, 'stroke-width': 1 });
+add('text', { x: pillX + 23, y: 19, class: 'band', 'text-anchor': 'middle', style: 'font-size:9px;fill:#ffb347' }, 'SWEEP');
+add('text', { x: pillX + 46 + 6, y: 19, class: 'band', style: 'fill:#b9c3d3' }, 'PK-55 A18 D35%');
+// mute icon, then the tuned channel
+add('text', { x: W - 4, y: 19, class: 'band', 'text-anchor': 'end' }, 'ch104 5520M');
+add('path', { d: `M ${W - 4 - 65 - 6} 12 l 3 0 l 2 -2 l 0 10 l -2 -2 l -3 0 z`, fill: '#5c6675' });
+add('path', { d: `M ${W - 4 - 65 - 6 + 7} 13 l 4 6 m 0 -6 l -4 6`, stroke: C.red, 'stroke-width': 1.2, fill: 'none' });
+
+// ---- spectrum --------------------------------------------------------------
+const spec = el('g', { transform: `translate(${OX},${OY + SPEC_Y})` });
+const sa = (n, a, t) => {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', n);
+  for (const k in a) e.setAttribute(k, a[k]);
+  if (t != null) e.textContent = t;
+  spec.appendChild(e);
+  return e;
+};
+sa('rect', { x: 0, y: 0, width: W, height: SPEC_H, fill: C.bg });
+[-80, -60, -40].forEach(db => sa('rect', { x: 0, y: Math.round(yd(db)), width: W, height: 1, fill: C.grid }));
+[1, 2, 3].forEach(k => sa('rect', { x: Math.round(W * k / 4), y: 0, width: 1, height: SPEC_H, fill: C.grid }));
+
+const pts = [];
+for (let x = 0; x < W; x++) pts.push(level(BAND_LO + x * SPAN / (W - 1)));
+const path = pts.map((v, x) => `${x ? 'L' : 'M'}${x} ${yd(v).toFixed(1)}`).join('');
+// the peak-hold band is filled with the grid colour, exactly as mask index 1 does
+sa('path', { d: `${path} L ${W - 1} ${SPEC_H} L 0 ${SPEC_H} Z`, fill: C.grid });
+sa('path', { d: path, fill: 'none', stroke: C.trace, 'stroke-width': 1.1 });
+// peak hold: a touch above the mean, amber dashes
+const hold = pts.map((v, x) => `${x ? 'L' : 'M'}${x} ${(yd(v) - 3 - 1.5 * Math.abs(Math.sin(x * 0.35))).toFixed(1)}`).join('');
+sa('path', { d: hold, fill: 'none', stroke: C.peak, 'stroke-width': 1, 'stroke-dasharray': '4 3' });
+// dB labels
+[-80, -60, -40].forEach(db => sa('text', { x: 3, y: Math.round(yd(db)) - 2, class: 'dim' }, String(db)));
+// axis ends
+sa('text', { x: 4, y: SPEC_H - 3, class: 'dim' }, '5170');
+sa('text', { x: W - 4, y: SPEC_H - 3, class: 'dim', 'text-anchor': 'end' }, '5895');
+// 20 MHz window of ch104
+const bx0 = px(5510), bx1 = px(5530);
+sa('rect', { x: bx0, y: 0, width: bx1 - bx0 + 1, height: 1, fill: C.peak });
+sa('rect', { x: bx0, y: SPEC_H - 1, width: bx1 - bx0 + 1, height: 1, fill: C.peak });
+sa('rect', { x: bx0, y: 0, width: 1, height: SPEC_H, fill: C.peak });
+sa('rect', { x: bx1, y: 0, width: 1, height: SPEC_H, fill: C.peak });
+// callout
+const lab = 'ch104 21/37 57%';
+const lw = lab.length * 6 - 1 + 10;
+sa('rect', { x: 3, y: 5, width: lw, height: 13, fill: C.bg, stroke: C.grid, 'stroke-width': 1 });
+sa('text', { x: 8, y: 15, class: 'small', style: 'fill:#ffb347' }, lab);
+
+// ---- waterfall -------------------------------------------------------------
+const wf = el('g', { transform: `translate(${OX},${OY + WF_Y})` });
+const wa = (n, a, t) => {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', n);
+  for (const k in a) e.setAttribute(k, a[k]);
+  if (t != null) e.textContent = t;
+  wf.appendChild(e);
+  return e;
+};
+const RAMP = [
+  [-96, [4, 6, 10]], [-90, [7, 24, 42]], [-85, [9, 50, 78]],
+  [-80, [11, 82, 108]], [-74, [13, 122, 146]], [-68, [16, 168, 172]],
+  [-62, [86, 200, 148]], [-55, [255, 179, 71]]
+];
+function heat(v) {
+  if (v <= RAMP[0][0]) return RAMP[0][1];
+  for (let i = 1; i < RAMP.length; i++) {
+    if (v <= RAMP[i][0]) {
+      const [a, ca] = RAMP[i - 1], [b, cb] = RAMP[i];
+      const t = (v - a) / (b - a);
+      return ca.map((c, k) => Math.round(c + (cb[k] - c) * t));
+    }
+  }
+  return RAMP[RAMP.length - 1][1];
+}
+for (let r = 0; r < WF_H; r++) {
+  // rows are oldest at the top: they fade towards the panel background
+  const age = 0.3 + 0.7 * (r / (WF_H - 1));
+  for (let x = 0; x < W; x++) {
+    const jitter = (Math.sin(x * 12.9898 + r * 78.233) * 43758.5453) % 1;
+    const drift = 1.4 * Math.sin((x + r * 7) * 0.09) + 1.1 * Math.sin((x - r * 11) * 0.05);
+    const v = pts[x] + drift + 3.2 * jitter + 1.2 * (1 - age);
+    const c = heat(v).map(k => Math.round(k * age));
+    wa('rect', { x, y: r, width: 1, height: 1, fill: `rgb(${c[0]},${c[1]},${c[2]})` });
+  }
+}
+
+// ---- channel strip ---------------------------------------------------------
+const st = el('g', { transform: `translate(${OX},${OY + STRIP_Y})` });
+const ta = (n, a, t) => {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', n);
+  for (const k in a) e.setAttribute(k, a[k]);
+  if (t != null) e.textContent = t;
+  st.appendChild(e);
+  return e;
+};
+ta('rect', { x: 0, y: 0, width: W, height: H - STRIP_Y, fill: C.panel });
+ta('rect', { x: 0, y: 0, width: W, height: 1, fill: C.bg });
+
+const strip = [];
+for (let c = 36; c <= 64; c += 4) strip.push({ c, f: 5180 + (c - 36) / 4 * 20 });
+strip.push({ c: 96, f: 5480 });
+for (let c = 100; c <= 144; c += 4) strip.push({ c, f: 5500 + (c - 100) / 4 * 20 });
+for (const c of [149, 153, 157, 161, 165]) strip.push({ c, f: 5745 + (c - 149) * 5 });
+for (const c of [169, 173, 177]) strip.push({ c, f: 5845 + (c - 169) * 5 });
+
+const slots = strip.map(s => {
+  const x0 = Math.max(0, Math.round(px(s.f - 10)));
+  const x1 = Math.min(W - 1, Math.round(px(s.f + 10)));
+  return { ...s, x0, x1 };
+});
+const gaps = [
+  { lo: 5330, hi: 5350, tag: 'R' },
+  { lo: 5350, hi: 5470, tag: 'SAT' },
+  { lo: 5730, hi: 5735, tag: '' }
+];
+const det = c => {
+  const strong = [5180, 5240, 5500, 5745, 5785, 5520];
+  const mid = [5200, 5320, 5560, 5805, 5845];
+  if (strong.includes(c)) return 86 + (c % 8);
+  if (mid.includes(c)) return 44 + (c % 16);
+  return 24 + (c % 12);
+};
+const act = c => {
+  const strong = [5180, 5240, 5745, 5785];
+  const mid = [5200, 5500, 5520, 5805];
+  if (strong.includes(c)) return 80 + (c % 10);
+  if (mid.includes(c)) return 46 + (c % 14);
+  return 16 + (c % 9);
+};
+// the detection bar is coloured by the channel peak, not by the percentage:
+// above -49 dBm-ish red, above -64 amber, otherwise green (mask code 70 / 40)
+const freqOf = c => c <= 64 ? 5180 + (c - 36) / 4 * 20
+  : c === 96 ? 5480
+  : c <= 144 ? 5500 + (c - 100) / 4 * 20
+  : c <= 165 ? 5745 + (c - 149) * 5
+  : 5845 + (c - 169) * 5;
+const pkOf = c => {
+  const f = freqOf(c);
+  let best = -96;
+  for (const [cc, pp] of chans) if (Math.abs(f - cc) < 12) best = Math.max(best, pp);
+  return best;
+};
+const barColor = v => v > -49 ? C.red : v > -64 ? C.peak : C.green;
+
+// selected cell tint
+const sel = slots.find(s => s.c === 104);
+ta('rect', { x: sel.x0, y: 2, width: sel.x1 - sel.x0 + 1, height: 27, fill: C.tint });
+
+slots.forEach(s => {
+  const w = Math.max(1, s.x1 - s.x0);
+  ta('rect', { x: s.x0, y: 11, width: w, height: 7, fill: '#1a1a1a' });
+  ta('rect', { x: s.x0, y: 20, width: w, height: 7, fill: '#121212' });
+  const dw = Math.max(1, Math.round(w * det(s.c) / 100));
+  const aw = Math.max(1, Math.round(w * act(s.c) / 100));
+  ta('rect', { x: s.x0, y: 11, width: dw, height: 7, fill: barColor(pkOf(s.c)) });
+  ta('rect', { x: s.x0, y: 20, width: aw, height: 7, fill: C.cyan });
+});
+// labels where they fit
+slots.forEach(s => {
+  const txt = String(s.c);
+  const tw = txt.length * 6 - 1;
+  const w = s.x1 - s.x0;
+  if (tw + 3 > w) return;
+  const lx = Math.round((s.x0 + s.x1) / 2 - tw / 2);
+  ta('text', { x: lx, y: 9, class: 'dim' }, txt);
+});
+gaps.forEach(gp => {
+  const x0 = Math.round(px(gp.lo)), x1 = Math.round(px(gp.hi));
+  const w = Math.max(1, x1 - x0);
+  ta('rect', { x: x0, y: 11, width: w, height: 7, fill: '#1f1c12' });
+  ta('rect', { x: x0, y: 20, width: w, height: 7, fill: '#141208' });
+  const dv = gp.tag === 'SAT' ? 26 : gp.tag === 'R' ? 48 : 8;
+  const dvc = gp.tag === 'SAT' ? C.green : gp.tag === 'R' ? C.peak : C.green;
+  const av = gp.tag === 'SAT' ? 44 : gp.tag === 'R' ? 30 : 10;
+  ta('rect', { x: x0, y: 11, width: Math.max(1, Math.round(w * dv / 100)), height: 7, fill: dvc });
+  ta('rect', { x: x0, y: 20, width: Math.max(1, Math.round(w * av / 100)), height: 7, fill: C.cyan });
+  if (gp.tag) {
+    const tw = gp.tag.length * 6 - 1;
+    if (tw + 2 <= w) {
+      ta('text', { x: Math.round((x0 + x1) / 2 - tw / 2), y: 9, class: 'dim', style: 'fill:#ffb347' }, gp.tag);
+    }
+  }
+});
+// cursor: short accent underline below the selected slot
+ta('rect', { x: sel.x0, y: 29, width: sel.x1 - sel.x0 + 1, height: 2, fill: C.accent });
+
+// ---- numbered badges -------------------------------------------------------
+const BADGES = [
+  [36, 65, 1], [110, 28, 2], [175, 28, 3], [315, 28, 4], [352, 28, 5],
+  [390, 110, 6], [390, 95, 7], [36, 144, 8], [390, 168, 9], [222, 90, 10],
+  [36, 91, 11], [36, 216, 12], [390, 258, 13], [390, 271, 14], [390, 284, 15],
+  [210, 305, 16]
+];
+BADGES.forEach(([x, y, n]) => {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  e.setAttribute('cx', x); e.setAttribute('cy', y); e.setAttribute('r', 6);
+  e.setAttribute('class', 'badge');
+  notes.appendChild(e);
+  const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  t.setAttribute('x', x); t.setAttribute('y', y + 3.2);
+  t.setAttribute('text-anchor', 'middle');
+  t.setAttribute('class', 'num');
+  t.textContent = n;
+  notes.appendChild(t);
+});
+</script>
