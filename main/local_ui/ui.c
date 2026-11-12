@@ -84,12 +84,16 @@ static void trace(const char *fmt, ...) { (void)fmt; }
  * The drawing areas are pure black: an IPS panel's black level is the floor of
  * the whole picture, so anything above 0x0000 reads as "washed out grey" once
  * the backlight is at full brightness. Only the status bar and the channel
- * strip keep a single 5-6-5 step of lift so their edges stay visible. */
+ * strip keep a lift of one 5-6-5 step so their edges stay visible — and even
+ * that was too much: 0x0862 is #080c10, which an IPS panel with the backlight
+ * wide open renders as a visibly lighter band. The values below are the lowest
+ * that still separate a surface from the black underneath (#000408 and
+ * #080808); anything darker is indistinguishable from 0x0000. */
 #define COL_BG      0x0000 /* #000000 */
 #define COL_SPEC_BG 0x0000 /* #000000 */
-#define COL_PANEL   0x0862 /* #080c10 — one step above black */
-#define COL_STRIP   0x0862 /* #080c10 */
-#define COL_GRID    0x10A3 /* faint grid on black */
+#define COL_PANEL   0x0021 /* #000408 — one 5-6-5 step above black */
+#define COL_STRIP   0x0021 /* #000408 */
+#define COL_GRID    0x0841 /* #080808 — faint grid, was #101418 */
 #define COL_DIM     0x5B2E /* #5c6675 */
 #define COL_MUTED   0xBE1A /* #b9c3d3 */
 #define COL_TEXT    0xE75D /* #e8edf4 */
@@ -104,6 +108,12 @@ static void trace(const char *fmt, ...) { (void)fmt; }
 #define COL_TINT_G  0x1A25 /* green 12% on panel */
 #define COL_USB     0x07FF
 #define COL_MUTE    0xF800
+/* Empty bar track. Both rows used to sit a step apart (0x1082 / 0x18C3, i.e.
+ * #101010 and #181818) so the two bars could be told apart when idle, but the
+ * detection row read as a grey band across the whole strip. With the rows now
+ * labelled and coloured differently the track only has to be "darker than a
+ * bar, lighter than the strip", so both share the same near-black value. */
+#define COL_SLOT    0x0841 /* #080808 */
 
 /* Minimum spacing between two sweep captures.
  *
@@ -156,6 +166,10 @@ static int pk_db, act_db, det_pct;
 static int64_t rot_start;
 static bool rot_prev;
 static uint8_t countdown_done;
+/* Backlight readout: the status bar swaps the channel text for "Bxx%" while a
+ * preset is being picked, so the dimmest step does not look like a dead panel. */
+static int64_t bright_hint_until;
+static int bright_hint_pct = -1;
 
 static uint8_t *mask;
 static uint8_t *wf;
@@ -503,6 +517,7 @@ static struct {
     bool valid;
     bool live, muted;
     int dpk, dact, ddet;
+    int hint; /* backlight readout in place of the channel text, -1 = none */
     unsigned ch, mhz;
     uint16_t edge;
 } top_cache;
@@ -542,9 +557,15 @@ static void render_top(unsigned w) {
     }
     unsigned shown = usb_active ? sdr_ui_frequency() : band_mhz(channel);
     uint16_t edge0 = live ? COL_GREEN : COL_PEAK;
+    /* Backlight readout. It expires on its own, so the cache comparison below
+     * sees the transition back to -1 and repaints the channel text. */
+    int hint = (bright_hint_pct >= 0 && esp_timer_get_time() < bright_hint_until)
+                   ? bright_hint_pct
+                   : -1;
     if (top_cache.valid && top_cache.live == live && top_cache.muted == muted &&
         top_cache.dpk == dpk && top_cache.dact == dact && top_cache.ddet == ddet &&
-        top_cache.ch == channel && top_cache.mhz == shown && top_cache.edge == edge0)
+        top_cache.ch == channel && top_cache.mhz == shown && top_cache.edge == edge0 &&
+        top_cache.hint == hint)
         return;
 
     /* LIVE changes pk/act/det on every capture, so the cache above misses
@@ -555,7 +576,8 @@ static void render_top(unsigned w) {
     int64_t now_us = esp_timer_get_time();
     bool structural = !top_cache.valid || top_cache.live != live ||
                       top_cache.muted != muted || top_cache.ch != channel ||
-                      top_cache.mhz != shown || top_cache.edge != edge0;
+                      top_cache.mhz != shown || top_cache.edge != edge0 ||
+                      top_cache.hint != hint;
     if (!structural && now_us - last_top_us < 250000) return;
     last_top_us = now_us;
 
@@ -594,13 +616,18 @@ static void render_top(unsigned w) {
         snprintf(line, sizeof(line), "P%d D%d%%", dpk, ddet);
     mask_text_big(bx + bw + 6, ty, line, 1);
 
-    if (w >= 300)
+    /* While a brightness preset is being picked the readout takes the place of
+     * the channel text: at the 10 % step the panel is dim enough that nothing
+     * else would tell the user the key press registered. */
+    if (hint >= 0)
+        snprintf(line, sizeof(line), "B%d%%", hint);
+    else if (w >= 300)
         snprintf(line, sizeof(line), "ch%u %uM", band_number(channel), shown);
     else
         snprintf(line, sizeof(line), "%u/%uM", band_number(channel), shown);
     unsigned tw = text_w_big(line);
     unsigned tx = (w > 4 + tw) ? w - 4 - tw : 0;
-    mask_text_big(tx, ty, line, 1);
+    mask_text_big(tx, ty, line, hint >= 0 ? 2 : 1);
     if (muted) mask_mute_icon(tx > 12 ? tx - 6 : w - 2, top / 2);
 
     lcd_draw_bitmap2(0, 0, w, top, mask, pal);
@@ -614,6 +641,7 @@ static void render_top(unsigned w) {
     top_cache.ch = channel;
     top_cache.mhz = shown;
     top_cache.edge = edge0;
+    top_cache.hint = hint;
 }
 
 
@@ -850,7 +878,7 @@ static void strip_draw_bar(unsigned i, bool sel) {
     unsigned det = ch_det[i] > 100 ? 100 : ch_det[i];
     unsigned act = ch_act[i] > 100 ? 100 : ch_act[i];
 
-    lcd_fill_rect(x0, STRIP_ACT_Y, slot, STRIP_BAR_H, sel ? COL_TINT_C : 0x1082);
+    lcd_fill_rect(x0, STRIP_ACT_Y, slot, STRIP_BAR_H, sel ? COL_TINT_C : COL_SLOT);
     if (act > 2) {
         unsigned bw = slot * act / 100;
         /* Same three colours the peak used to carry: below the 12 dB detection
@@ -858,7 +886,7 @@ static void strip_draw_bar(unsigned i, bool sel) {
         uint16_t ac = ch_act_db[i] < 12 ? COL_GREEN : ch_act_db[i] < 30 ? COL_PEAK : COL_RED;
         lcd_fill_rect(x0, STRIP_ACT_Y, bw ? bw : 1, STRIP_BAR_H, ac);
     }
-    lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, sel ? COL_TINT_C : 0x18C3);
+    lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, sel ? COL_TINT_C : COL_SLOT);
     if (det > 2) {
         unsigned bw = slot * det / 100;
         lcd_fill_rect(x0, STRIP_DET_Y, bw ? bw : 1, STRIP_BAR_H, COL_USB);
@@ -876,13 +904,13 @@ static void strip_draw_gap_bars(void) {
         unsigned slot = x1 - x0;
         unsigned det = gap_det[g] > 100 ? 100 : gap_det[g];
         unsigned act = gap_act[g] > 100 ? 100 : gap_act[g];
-        lcd_fill_rect(x0, STRIP_ACT_Y, slot, STRIP_BAR_H, 0x10A1);
+        lcd_fill_rect(x0, STRIP_ACT_Y, slot, STRIP_BAR_H, COL_SLOT);
         if (act > 2) {
             unsigned bw = slot * act / 100;
             uint16_t ac = gap_pk[g] < 12 ? COL_GREEN : gap_pk[g] < 30 ? COL_PEAK : COL_RED;
             lcd_fill_rect(x0, STRIP_ACT_Y, bw ? bw : 1, STRIP_BAR_H, ac);
         }
-        lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, 0x18A1);
+        lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, COL_SLOT);
         if (det > 2) {
             unsigned bw = slot * det / 100;
             lcd_fill_rect(x0, STRIP_DET_Y, bw ? bw : 1, STRIP_BAR_H, COL_USB);
@@ -1279,6 +1307,29 @@ static void adjust_limit(bool top, int direction) {
     buzzer_play(top ? UI_BUZZ_TOP : UI_BUZZ_BOTTOM);
 }
 
+/* Backlight presets, chord: hold the rotary knob, then LEFT/RIGHT. The list is
+ * stepped through in order and wraps at both ends, so from 100 % a tap to the
+ * right drops to 10 % instead of sticking at the top. The floor is 10 % rather
+ * than 0: with the panel fully dark there is no way to tell a dimmed screen from
+ * a dead one, and the 10 % step is still dark enough for a pitch-black room. */
+static const uint8_t k_bright[] = {10, 25, 50, 75, 100};
+#define BRIGHT_STEPS (sizeof(k_bright) / sizeof(k_bright[0]))
+
+static void adjust_brightness(int direction) {
+    unsigned cur = 0;
+    for (unsigned i = 0; i < BRIGHT_STEPS; i++)
+        if (k_bright[i] <= cfg.bright) cur = i;
+    int next = (int)cur + direction;
+    if (next < 0) next = (int)BRIGHT_STEPS - 1;
+    if (next >= (int)BRIGHT_STEPS) next = 0;
+    cfg.bright = k_bright[next];
+    lcd_backlight_set(cfg.bright);
+    ui_settings_save(&cfg); /* saved the moment it changes, like mute */
+    bright_hint_pct = cfg.bright;
+    bright_hint_until = esp_timer_get_time() + 1200000;
+    buzzer_play(UI_BUZZ_CHANNEL);
+}
+
 static void toggle_band(void) {
     cfg.band = cfg.band == UI_BAND_5G ? UI_BAND_24G : UI_BAND_5G;
     channel = (uint8_t)middle_index();
@@ -1347,6 +1398,7 @@ static void reset_defaults(void) {
     ui_settings_defaults(&fresh);
     cfg = fresh;
     apply_stored_scale();
+    lcd_backlight_set(cfg.bright);
     muted = false;
     buzzer_enable(true);
     channel = (uint8_t)middle_index();
@@ -1412,6 +1464,8 @@ static void handle_events(const ui_button_event_t *event) {
             adjust_limit(true, direction);
         else if (event->dir_mod == 2)
             adjust_limit(false, direction);
+        else if (event->dir_mod == 3)
+            adjust_brightness(direction);
         else
             change_channel(direction);
     }
@@ -1541,6 +1595,10 @@ void local_ui_start(void) {
     palette_init();
 
     ui_settings_load(&cfg);
+    /* The panel is dark until here (lcd_init leaves the backlight at 0 %), so
+     * the first thing the user sees is already the saved brightness instead of
+     * a full-white flash followed by a dip. */
+    lcd_backlight_set(cfg.bright);
     lcd_set_rotation(cfg.landscape != 0);
     layout_build();
     /* Start on the stored limits for the boot mode, not on the compile-time

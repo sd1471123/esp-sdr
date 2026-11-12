@@ -59,14 +59,22 @@ static void press_edge(unsigned j, int64_t now, ui_button_event_t *event) {
     buttons[j].repeated = false;
     buttons[j].mod = 0;
     if (j == UI_BTN_LEFT || j == UI_BTN_RIGHT) {
-        /* The combo only works in this order: BAND/MODE first, then a direction key.
-         * A modifier pressed after the direction key stays a normal short press. */
+        /* The combo only works in this order: BAND/MODE/ROT first, then a
+         * direction key. A modifier pressed after the direction key stays a
+         * normal short press. */
         if (buttons[UI_BTN_BAND].stable) {
             buttons[j].mod = 1;
             buttons[UI_BTN_BAND].skip_short = true;
         } else if (buttons[UI_BTN_MODE].stable) {
             buttons[j].mod = 2;
             buttons[UI_BTN_MODE].skip_short = true;
+        } else if (buttons[UI_BTN_ROT].stable) {
+            /* Rotary knob held = backlight modifier. Holding it for the normal
+             * 5 s no longer fires the factory reset while a direction key is
+             * down, otherwise adjusting brightness for a few seconds would wipe
+             * the saved settings. */
+            buttons[j].mod = 3;
+            buttons[UI_BTN_ROT].skip_short = true;
         }
         unsigned other = j == UI_BTN_LEFT ? UI_BTN_RIGHT : UI_BTN_LEFT;
         if (buttons[other].stable && !buttons[other].suppressed &&
@@ -106,7 +114,8 @@ void buttons_poll(ui_button_event_t *event) {
                 release_edge(j, event);
         }
         if (!b->stable || b->suppressed) continue;
-        if (j == UI_BTN_ROT && !b->long_sent && now - b->pressed_us >= LONG_PRESS_US) {
+        if (j == UI_BTN_ROT && !b->long_sent && !b->skip_short &&
+            now - b->pressed_us >= LONG_PRESS_US) {
             b->long_sent = true;
             event->long_press |= (uint16_t)(1u << j);
         }

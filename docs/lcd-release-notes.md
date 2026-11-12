@@ -36,10 +36,10 @@ python -m esptool --chip esp32c5 -p COM6 -b 460800 \
 
 | 文件 | 偏移 | 大小 | 说明 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` | `0x0` | 942512 | 正式版合并镜像，SPI **8 MHz** |
-| `esp32c5-lcd-app.bin` | `0x10000` | 876976 | 正式版应用 |
-| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 942512 | **4 MHz 回退镜像**，代码相同，长杜邦线上 8 MHz 出问题时用这个 |
-| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 876976 | 4 MHz 回退应用 |
+| `esp32c5-lcd-full.bin` | `0x0` | 943536 | 正式版合并镜像，SPI **8 MHz** |
+| `esp32c5-lcd-app.bin` | `0x10000` | 878000 | 正式版应用 |
+| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 943536 | **4 MHz 回退镜像**，代码相同，长杜邦线上 8 MHz 出问题时用这个 |
+| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 878000 | 4 MHz 回退应用 |
 | `esp32c5-lcd-full-diag.bin` | `0x0` | 946960 | 调试版，UART0 115200 + UI 日志，与正式版同一份代码 |
 | `esp32c5-lcd-app-diag.bin` | `0x10000` | 881424 | 调试版应用 |
 | `esp32c5-lcd-pinprobe.bin` | `0x10000` | 136736 | 引脚探针，只烧应用：碰一下排针就用蜂鸣器报出 GPIO 号 |

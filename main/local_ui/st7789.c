@@ -8,11 +8,116 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_heap_caps.h"
+#include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
+#include "soc/gpio_sig_map.h"
+#include "soc/ledc_struct.h"
+#include "soc/pcr_struct.h"
 #include <string.h>
 
 #define LCD_SPI_HOST SPI2_HOST
 #define STAGE_PIXELS 512
+
+/* Backlight dimmer.
+ *
+ * GP23 drives the module's BL pin, which on this glass is the LED string's
+ * cathode through a series resistor — a plain high/low there can only be "full"
+ * or "off", and full brightness is what made the near-black UI look washed out.
+ *
+ * The obvious route, esp_driver_ledc, was tried and rejected: it pushes BSS past
+ * 0x40820000, the SRAM bank the C5 modem owns during adctrig, and the
+ * sram_guard.ld assertion stops the link. The registers below do the same job in
+ * a few writes and add no static data at all.
+ *
+ * 13-bit resolution at 5 kHz: 80 MHz / (500/256) / 8192 = 5000.0 Hz exactly, so
+ * the divider is the exact Q10.8 value and there is no frequency error. 5 kHz is
+ * far above visible flicker and above the audible band. */
+#define BL_CHANNEL   0
+#define BL_TIMER     0
+#define BL_DUTY_BITS 13
+#define BL_DIV_Q8    500 /* 1.953125 * 256 */
+#define BL_DUTY_FULL (1u << BL_DUTY_BITS)
+
+static bool bl_pwm_ready;
+
+static void backlight_pwm_init(void) {
+    /* Clock tree first, and in this order. Two separate gates exist on C5:
+     * ledc_clk_en is the APB bus clock for the register file, ledc_sclk_en is
+     * the functional clock the timer counts on. The driver enables both; writing
+     * the registers by hand it is easy to set only the bus clock, and then the
+     * timer never advances. The channel output stays parked at its idle level,
+     * the backlight never lights, and it looks like "stuck at 0 %" no matter
+     * which preset is selected. */
+    PCR.ledc_conf.ledc_clk_en = 1;
+    /* ledc_sclk_sel is a TWO-bit field on C5 and the only legal sources are
+     * 0 = XTAL, 1 = RC_FAST, 2 = PLL_F80M. There is no APB entry here (PCR
+     * documents just those three, and the C5 LL aborts on LEDC_SLOW_CLK_APB),
+     * so writing the old-chip value 3 leaves the mux pointing at nothing: the
+     * timer never counts and the channel output parks at its idle level. 2 is
+     * the 80 MHz PLL, which is what the divider below is calculated for. */
+    PCR.ledc_sclk_conf.ledc_sclk_sel = 2; /* PLL_F80M, 80 MHz */
+    PCR.ledc_sclk_conf.ledc_sclk_en = 1;
+    PCR.ledc_conf.ledc_rst_en = 1;
+    PCR.ledc_conf.ledc_rst_en = 0;
+    PCR.ledc_pd_ctrl.ledc_mem_force_pu = 1;
+    PCR.ledc_pd_ctrl.ledc_mem_force_pd = 0;
+
+    volatile ledc_timer_group_reg_t *tg = &LEDC.timer_group[BL_TIMER];
+    tg->timer[BL_TIMER].conf.clk_div = BL_DIV_Q8;
+    tg->timer[BL_TIMER].conf.duty_res = BL_DUTY_BITS;
+    tg->timer[BL_TIMER].conf.pause = 1; /* hold while the channel is set up */
+    tg->timer[BL_TIMER].conf.para_up = 1;
+    tg->timer[BL_TIMER].conf.rst = 1;
+    tg->timer[BL_TIMER].conf.rst = 0;
+
+    volatile ledc_chn_reg_t *ch = &LEDC.channel_group[BL_CHANNEL].channel[BL_CHANNEL];
+    ch->conf0.timer_sel = BL_TIMER;
+    ch->conf0.idle_lv = 0; /* off while the channel is idle = 0 % */
+    ch->conf0.sig_out_en = 1;
+    ch->duty_init.duty = 0;
+    ch->conf1.duty_start = 1;
+    ch->conf0.para_up = 1; /* latch the channel config */
+
+    tg->timer[BL_TIMER].conf.pause = 0;
+    tg->timer[BL_TIMER].conf.para_up = 1;
+    /* Route the channel to the pin through the GPIO matrix; nothing appears on
+     * GP23 without this even though sig_out_en is set. */
+    esp_rom_gpio_connect_out_signal(LCD_PIN_BL, LEDC_LS_SIG_OUT0_IDX + BL_CHANNEL, false, false);
+
+    /* Prove the timer is actually running before trusting it. The sample gap has
+     * to be a NON-multiple of the PWM period: at 5 kHz the period is exactly
+     * 200 us, so a 400 us gap lands on the same counter value every time and a
+     * perfectly healthy timer looks dead. 137 us is 0.685 of a period, i.e. the
+     * counter must advance by ~5600 of its 8192 steps. Two equal samples
+     * therefore really do mean the block has no clock. Rather than ship a black
+     * screen, hand the pin back to a plain GPIO and run at full brightness — the
+     * pre-PWM behaviour — so the UI is always readable. */
+    uint32_t cnt_a = tg->timer[BL_TIMER].value.timern_cnt;
+    esp_rom_delay_us(137);
+    uint32_t cnt_b = tg->timer[BL_TIMER].value.timern_cnt;
+    bl_pwm_ready = (cnt_a != cnt_b);
+    if (!bl_pwm_ready) {
+        esp_rom_gpio_connect_out_signal(LCD_PIN_BL, SIG_GPIO_OUT_IDX, false, false);
+        gpio_set_level(LCD_PIN_BL, 1);
+    }
+}
+
+void lcd_backlight_set(uint8_t pct) {
+    if (pct > 100) pct = 100;
+    if (!bl_pwm_ready) {
+        /* PWM never came up (see the counter probe in the init above), so the
+         * pin is back to plain GPIO. Dimming is impossible in that mode; keep the
+         * panel lit rather than let a 0 % preset leave the user with a black
+         * screen and no way to tell whether the board is alive. */
+        gpio_set_level(LCD_PIN_BL, 1);
+        return;
+    }
+    volatile ledc_chn_reg_t *ch = &LEDC.channel_group[BL_CHANNEL].channel[BL_CHANNEL];
+    /* duty_init carries four fractional bits, so the integer part shifts left. */
+    ch->duty_init.duty = (uint32_t)pct * BL_DUTY_FULL / 100u << 4;
+    ch->conf1.duty_start = 1;
+    ch->conf0.para_up = 1;
+}
 
 /* Controller on the 8-pin GMT032-8P-SPI module is an ST7789 (240x320). An
  * ILI9341 power-on sequence is kept behind LCD_CTRL_ILI9341 because the two
@@ -287,7 +392,11 @@ bool lcd_init(void) {
     lcd_cmd(0x29, NULL, 0); /* display on */
     esp_rom_delay_us(20000);
 #endif
-    gpio_set_level(LCD_PIN_BL, 1);
+    /* Hand the backlight pin over to the PWM channel. It stays at 0 until the UI
+     * has read the saved brightness, so the first thing on screen is never a
+     * full-white flash. */
+    backlight_pwm_init();
+    lcd_backlight_set(0);
 #if LCD_SELFTEST
     lcd_selftest();
 #endif

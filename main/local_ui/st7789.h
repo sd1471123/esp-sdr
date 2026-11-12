@@ -20,3 +20,8 @@ void lcd_pixels_end(void);
 /* 2 bits per pixel, most significant bits first; 4-entry RGB565 palette. */
 void lcd_draw_bitmap2(unsigned x, unsigned y, unsigned w, unsigned h, const uint8_t *pixels,
                       const uint16_t palette[4]);
+/* Backlight brightness, 0-100 %. GP23 is a PWM channel after lcd_init(), so
+ * this is a real dimmer and not just an on/off switch. 0 turns the panel dark
+ * without touching the display controller, so the picture is still there when
+ * the brightness comes back. */
+void lcd_backlight_set(uint8_t pct);

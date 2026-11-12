@@ -11,6 +11,7 @@ typedef struct {
     uint8_t landscape; /* 1 = 320x240 */
     uint8_t buzz;      /* 1 = buzzer enabled */
     uint8_t mute;      /* 1 = muted (persisted with the chord) */
+    uint8_t bright;    /* backlight, percent: 10/25/50/75/100 */
     /* Four independent dB windows: SWEEP/LIVE x 2.4G/5G. Each array is indexed
      * by ui_band_t (0 = 2.4G, 1 = 5G). Both modes are fixed; no auto-range. */
     int8_t top_db[2];         /* SWEEP upper limit */

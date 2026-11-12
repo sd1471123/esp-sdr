@@ -18,6 +18,9 @@ if(IDF_TARGET STREQUAL "esp32s31")
 endif()
 set(receiver "${target_dir}/receiver.c")
 set(sources "common/burst_serial.c" "common/burst_gpio.c" "common/burst_beep.c" "common/burst_led.c" "common/burst_version.c" "common/spectrum_stats.c" "common/rx_recalibration.c" "common/rx_calibration_state.c")
+# esp_driver_ledc is deliberately *not* a requirement: its driver states push
+# BSS past the 0x40820000 SRAM guard (the C5 RF dump window), so st7789.c drives
+# the LEDC registers directly instead. See the backlight block there.
 set(dependencies esp_driver_gpio esp_driver_rmt esp_hw_support esp_phy esp_wifi nvs_flash esp_timer esp_driver_uart esp-dsp)
 # The component requirements are expanded before sdkconfig exists, so gate on
 # the target rather than on CONFIG_ESP_SDR_LOCAL_UI here.
