@@ -6,6 +6,28 @@
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
 #include "esp_log.h"
+#include "soc/soc_caps.h"
+
+/* ESP32-C2 and ESP32-C61 have no RMT block at all: their soc_caps leaves
+ * SOC_RMT_SUPPORTED at 0 and the clock-source enum the channel config asks for
+ * does not exist, so the driver cannot even be compiled. Keep the command
+ * surface but stay silent rather than failing the build for those targets. */
+#if !SOC_RMT_SUPPORTED
+
+void burst_beep_init(void) {}
+
+int burst_beep_owned_pin(void) {
+    return -1;
+}
+
+void burst_beep_silence(void) {}
+
+bool burst_beep_command(const char *line) {
+    (void)line;
+    return false;
+}
+
+#else
 
 #define BEEP_RESOLUTION_HZ 1000000u /* 1 us per tick */
 #define BEEP_MIN_HZ 100
@@ -139,3 +161,5 @@ bool burst_beep_command(const char *line) {
     reply("ERR beep_args\n");
     return true;
 }
+
+#endif /* SOC_RMT_SUPPORTED */

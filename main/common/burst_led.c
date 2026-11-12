@@ -8,8 +8,12 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "soc/soc_caps.h"
 
-#if CONFIG_ESP_SDR_LED_PIN >= 0
+/* The WS2812 line is bit-banged by an RMT channel, so a board only gets an LED
+ * when it has both a configured pin and the peripheral: ESP32-C2 and ESP32-C61
+ * have no RMT and fall through to the stub below. */
+#if CONFIG_ESP_SDR_LED_PIN >= 0 && SOC_RMT_SUPPORTED
 
 #define LED_RESOLUTION_HZ 20000000u /* 50 ns per tick */
 /* WS2812B timing in 50 ns ticks: bit period 25 ticks = 1.25 us. */
