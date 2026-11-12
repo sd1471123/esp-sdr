@@ -13,7 +13,8 @@ class SnapshotSpectrum(unittest.TestCase):
     def test_mean_max_bin_order_and_frame_counts(self):
         source = (ROOT / 'main/common/spectrum.c').read_text()
         sdk_headers = ['esp_cpu.h', 'dsps_fft2r.h', 'esp_rom_crc.h', 'esp_timer.h',
-                       'freertos/FreeRTOS.h', 'freertos/task.h', 'spectrum_fft.h']
+                       'esp_heap_caps.h', 'freertos/FreeRTOS.h', 'freertos/task.h',
+                       'spectrum_fft.h']
         for header in sdk_headers:
             source = source.replace(f'#include "{header}"', '')
         stub = r'''
@@ -24,6 +25,20 @@ class SnapshotSpectrum(unittest.TestCase):
 #include "spectrum_stats.h"
 #include "burst_serial.h"
 #define ESP_OK 0
+/* spectrum.c keeps the FFT input and the twiddle table on the heap because the
+ * C5 radio's dump window leaves no room for them in static BSS. A bump
+ * allocator over a fixed pool is enough here: two allocations, never freed. */
+#define MALLOC_CAP_8BIT (1u << 3)
+static uint8_t heap_pool[65536] __attribute__((aligned(16)));
+static unsigned heap_used;
+static void *heap_caps_aligned_alloc(unsigned align, unsigned size, unsigned caps) {
+    (void)align;
+    (void)caps;
+    unsigned off = (heap_used + 15u) & ~15u;
+    if (off + size > sizeof(heap_pool)) return 0;
+    heap_used = off + size;
+    return heap_pool + off;
+}
 unsigned spectrum_dc_mode;
 static unsigned transforms,frames,wanted_units,wanted_n,wanted_detector,full_scale,stop_after, release_at;
 static unsigned batch_start;

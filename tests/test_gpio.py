@@ -72,6 +72,10 @@ int gpio_config(const gpio_config_t *c) {
 int gpio_set_level(unsigned pin,unsigned level) { ++calls;order=1;if(fail)return -1;levels[pin]=level;return 0; }
 int gpio_set_direction(unsigned pin,int mode) { ++calls;if(mode==GPIO_MODE_OUTPUT)assert(order==1);order=0;modes[pin]=mode;return 0; }
 bool burst_serial_send(const void *data,size_t size) { assert(size<sizeof(response));memcpy(response,data,size);response[size]=0;return true; }
+/* The GPIO service excludes lines owned by the status LED and the buzzer. No
+ * such hardware in this harness, so both report -1 and exclude nothing. */
+int burst_led_owned_pin(void) { return -1; }
+int burst_beep_owned_pin(void) { return -1; }
 int main(void) {
  burst_gpio_init();assert(configured==EXPECTED_MASK);
  assert(reserved==(EXPECTED_MASK|(UINT64_C(1)<<5)));

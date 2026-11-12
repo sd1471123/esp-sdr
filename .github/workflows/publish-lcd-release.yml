@@ -18,6 +18,14 @@ on:
 permissions:
   contents: write
 
+# One publisher at a time. Pushing two tags together otherwise starts two runs
+# at once: both list the releases before either has created one, so neither
+# deletes the other and the branch ends up advertising two "latest" images.
+# Queued rather than cancelled, so the newest tag still wins in push order.
+concurrency:
+  group: publish-lcd-release
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-24.04

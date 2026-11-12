@@ -43,6 +43,12 @@ static void reply(const char *s) { snprintf(response,sizeof(response),"%s",s); }
 static bool gain_command(const char *s) { return false; }
 static bool burst_version_command(const char *s) { return false; }
 static bool burst_gpio_command(const char *s) { return false; }
+/* Status LED and buzzer live in their own modules; stub them so the sliced
+ * receiver stays self-contained, and re-declare the inner handler whose real
+ * forward declaration sits above the slice point. */
+static bool burst_led_command(const char *s) { return false; }
+static bool burst_beep_command(const char *s) { return false; }
+static void handle_command_inner(char *line);
 static bool limits_command(const char *s) { return false; }
 static bool capture(unsigned n,unsigned d,unsigned f) { ++captures;last_samples=n;last_format=f;return true; }
 static void vTaskDelay(int ticks) {}

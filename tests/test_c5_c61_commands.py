@@ -18,6 +18,12 @@ void rx_recalibrate(unsigned mhz) {}
 #include <stdbool.h>
 static bool burst_version_command(const char *s) { return false; }
 static bool burst_gpio_command(const char *s) { return false; }
+/* The receiver takes its status-LED and buzzer handlers from their own modules.
+ * Stub them out so the slice stays self-contained, and re-declare the inner
+ * handler whose forward declaration lives above the slice point. */
+static bool burst_led_command(const char *s) { return false; }
+static bool burst_beep_command(const char *s) { return false; }
+static void handle_command_inner(char *line);
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
