@@ -106,8 +106,8 @@ GPIO13/14 是 USB D-/D+，GPIO11/12 是 UART0 控制台，都不要拿来接屏�
 
 | 文件 | 偏移 | 大小 | 说明 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` | `0x0` | 941184 | **正式版**合并镜像（SPI 8 MHz），一次烧完 |
-| `esp32c5-lcd-app.bin` | `0x10000` | 875648 | 正式版应用（占 1 MB 分区 84%） |
+| `esp32c5-lcd-full.bin` | `0x0` | 941184 | **整片镜像**（SPI 8 MHz），首次烧写用；**会清空 NVS 设置** |
+| `esp32c5-lcd-app.bin` | `0x10000` | 875648 | 应用镜像，日常更新用这个（保留设置） |
 | `esp32c5-lcd-full-4mhz.bin` | `0x0` | 941184 | 4 MHz 回退镜像，代码相同只是时钟更低 |
 | `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 875648 | 4 MHz 回退应用 |
 | `esp32c5-lcd-full-diag.bin` | `0x0` | 946960 | 调试版（115200 + UI 日志），与正式版同一份代码 |
@@ -118,21 +118,35 @@ Flash 2 MB，DIO，80 MHz。`full` 镜像由 `merge_full.py` 把三段按偏移�
 
 ## 烧写
 
-整片烧写（推荐）：
+> ⚠️ **整片烧录会清空设置。** `esp32c5-lcd-full.bin` 是从 `0x0` 开始的连续镜像，
+> 分区表结束（`0x8C00`）到 app（`0x10000`）之间要用 `0xFF` 填充，而 NVS 正好在
+> `0x9000–0xF000`。烧它等于把静音、频段、模式、四套 dB 量程全部抹掉。
+
+**日常更新（推荐，保留设置）**：
+
+```bash
+./flash.sh                 # 默认 COM6，可用 PORT=COM7 ./flash.sh 覆盖
+```
+
+它只写 bootloader + 分区表 + app，NVS 区不动。等价的手动命令：
 
 ```bash
 python -m esptool --chip esp32c5 -p COM6 -b 460800 \
   --before default-reset --after hard-reset \
   write-flash --flash-mode dio --flash-size 2MB --flash-freq 80m \
-  0x0 esp32c5-lcd-full.bin
+  0x2000 esp32c5-lcd-bootloader.bin \
+  0x8000 esp32c5-lcd-partition-table.bin \
+  0x10000 esp32c5-lcd-app.bin
 ```
 
-只更新应用（保留 NVS 里的设置）：
+**首次烧写 / 救砖（会清设置）**：
 
 ```bash
-python -m esptool --chip esp32c5 -p COM6 -b 460800 \
-  write-flash 0x10000 esp32c5-lcd-app.bin
+./flash.sh --erase-settings
 ```
+
+或者手动 `write-flash ... 0x0 esp32c5-lcd-full.bin`。分区表改过、或 NVS 里的值
+已经乱了的时候才用它。
 
 ## 从源码构建
 

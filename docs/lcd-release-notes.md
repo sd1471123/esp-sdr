@@ -8,20 +8,28 @@
 
 ## 烧写
 
-整片烧写（推荐，Flash 2 MB / DIO / 80 MHz）：
+> ⚠️ **整片烧录会清空设置。** `esp32c5-lcd-full.bin` 是从 `0x0` 起的连续镜像，
+> 中间要用 `0xFF` 填满，而 NVS 就在 `0x9000–0xF000`，所以静音、频段、模式、
+> 四套 dB 量程都会丢。日常更新请用下面的分段命令。
+
+日常更新（保留设置，Flash 2 MB / DIO / 80 MHz）：
+
+```bash
+python -m esptool --chip esp32c5 -p COM6 -b 460800 \
+  --before default-reset --after hard-reset \
+  write-flash --flash-mode dio --flash-size 2MB --flash-freq 80m \
+  0x2000 esp32c5-lcd-bootloader.bin \
+  0x8000 esp32c5-lcd-partition-table.bin \
+  0x10000 esp32c5-lcd-app.bin
+```
+
+首次烧写 / 救砖（会清设置）：
 
 ```bash
 python -m esptool --chip esp32c5 -p COM6 -b 460800 \
   --before default-reset --after hard-reset \
   write-flash --flash-mode dio --flash-size 2MB --flash-freq 80m \
   0x0 esp32c5-lcd-full.bin
-```
-
-只更新应用（保留 NVS 里的频段、模式、横竖屏、静音和四套 dB 量程）：
-
-```bash
-python -m esptool --chip esp32c5 -p COM6 -b 460800 \
-  write-flash 0x10000 esp32c5-lcd-app.bin
 ```
 
 ## 镜像说明
