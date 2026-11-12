@@ -4,9 +4,10 @@
 手持频谱仪——板上直接接一块 3.2 英寸 SPI 屏和 5 个按键，实时显示 2.4 GHz /
 5 GHz 的频谱、瀑布和信道活动度。
 
-![面板界面设计稿](docs/lcd-ui-preview.png)
+![面板界面编号说明](docs/ui-guide.png)
 
-（上图是设计稿；实际界面的可交互版本在 [docs/lcd-ui-preview.html](docs/lcd-ui-preview.html)。）
+（上图就是固件实际的界面布局，SWEEP 模式、选中 ch104；每个编号对应的元素见下面的
+[界面](#界面)一节。图由 [docs/ui-guide.html](docs/ui-guide.html) 按固件里的真实坐标生成。）
 
 ## 硬件
 
@@ -81,10 +82,8 @@ UART0 2 Mbaud 或 USB-Serial-JTAG 上的 burst I/Q 与频谱命令照旧可用�
 
 ## 界面
 
-![编号界面说明](docs/ui-guide.png)
-
-图里是 **SWEEP 模式、选中 ch104** 的状态，所有区域同时有数据。LIVE 模式下底栏
-信道条会消失、频谱和瀑布各让出 14 像素，频率轴换成当前 ±10 MHz；其余元素不变。
+编号对应[开头那张图](docs/ui-guide.png)。**LIVE 模式**下底栏信道条会消失、频谱和
+瀑布各让出 14 像素，频率轴换成当前 ±10 MHz；其余元素不变。
 
 ### 顶栏（0–30 行）
 
