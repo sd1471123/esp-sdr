@@ -233,6 +233,33 @@ static unsigned band_number(unsigned idx) {
 }
 static unsigned band_mhz(unsigned idx) { return idx < band_count() ? band_tab()[idx].mhz : 0; }
 
+/* Stretches between Wi-Fi channels that have no channel number of their own.
+ * 5330-5350 is radar-only inside the DFS band, 5350-5470 is satellite active
+ * sensing (Sentinel-1 SAR sits at 5405), and the 5 MHz sliver at 5730-5735 falls
+ * inside the ISM band. They still get measured and shown, only the label is the
+ * band's purpose instead of a channel number. */
+typedef struct {
+    uint16_t lo, hi;
+    const char *tag;
+} gap_t;
+
+static const gap_t k_gaps5g[] = {
+    {5330, 5350, "RADAR"},
+    {5350, 5470, "SAT"},
+    {5730, 5735, "ISM"},
+};
+#define GAP_COUNT (sizeof(k_gaps5g) / sizeof(k_gaps5g[0]))
+
+static unsigned gap_count(void) { return cfg.band == UI_BAND_5G ? GAP_COUNT : 0; }
+static unsigned gap_lo(unsigned i) { return k_gaps5g[i].lo; }
+static unsigned gap_hi(unsigned i) { return k_gaps5g[i].hi; }
+static const char *gap_tag(unsigned i) { return k_gaps5g[i].tag; }
+
+/* Same three numbers as the Wi-Fi channels, for the stretches that have no
+ * channel number. Kept tiny: BSS is already fighting the C5 RF dump window. */
+static uint8_t gap_pk[GAP_COUNT], gap_act[GAP_COUNT], gap_det[GAP_COUNT];
+static uint16_t gap_hits[GAP_COUNT];
+
 /* The sweep steps its LO every 20 MHz from band start - 10 to band end + 10. */
 static unsigned sweep_steps(void) { return (band_hi() + 10 - (band_lo() - 10)) / 20 + 1; }
 static unsigned sweep_lo(unsigned i) { return band_lo() - 10 + i * 20; }
@@ -756,6 +783,7 @@ static struct {
     bool usb;
     uint8_t band;
     uint8_t det[36], act[36], pk[36];
+    uint8_t gdet[GAP_COUNT], gact[GAP_COUNT], gpk[GAP_COUNT];
 } strip_cache;
 
 static unsigned strip_selected(unsigned count) {
@@ -832,21 +860,28 @@ static void strip_draw_bar(unsigned i, bool sel) {
     }
 }
 
-/* Slots with no Wi-Fi channel (5320–5480, 5725–5745 …) get a faint warm wash so
- * the blank stretch on the axis reads as "spectrum without a channel number"
- * rather than as a hole in the rendering. */
-static void strip_draw_gaps(unsigned w) {
-    unsigned count = band_count();
-    /* 2.4 GHz channels overlap by design (5 MHz spacing, 20 MHz wide), so there
-     * is no "no channel here" stretch to mark. */
-    if (cfg.band != UI_BAND_5G) return;
-    for (unsigned i = 1; i < count; i++) {
-        unsigned prev = band_mhz(i - 1) + 10, cur = band_mhz(i) - 10;
-        if (cur <= prev + 2) continue;
-        unsigned x0 = strip_x(prev, w), x1 = strip_x(cur, w);
-        if (x1 > x0)
-            lcd_fill_rect(x0, STRIP_DET_Y, x1 - x0,
-                          STRIP_ACT_Y + STRIP_BAR_H - STRIP_DET_Y, 0x18A1);
+/* Special stretches (RADAR / SAT / ISM) get the same two bars as the channels.
+ * The label row above them carries the band's purpose instead of a channel
+ * number, which is why they are drawn here and not by strip_draw_bar(). */
+static void strip_draw_gap_bars(void) {
+    unsigned w = lcd_width();
+    for (unsigned g = 0; g < gap_count(); g++) {
+        unsigned x0 = strip_x(gap_lo(g), w), x1 = strip_x(gap_hi(g), w);
+        if (x1 <= x0) continue;
+        unsigned slot = x1 - x0;
+        unsigned det = gap_det[g] > 100 ? 100 : gap_det[g];
+        unsigned act = gap_act[g] > 100 ? 100 : gap_act[g];
+        lcd_fill_rect(x0, STRIP_DET_Y, slot, STRIP_BAR_H, 0x18A1);
+        if (det > 2) {
+            unsigned bw = slot * det / 100;
+            uint16_t dc = gap_pk[g] > 70 ? COL_RED : gap_pk[g] > 40 ? COL_PEAK : COL_GREEN;
+            lcd_fill_rect(x0, STRIP_DET_Y, bw ? bw : 1, STRIP_BAR_H, dc);
+        }
+        lcd_fill_rect(x0, STRIP_ACT_Y, slot, STRIP_BAR_H, 0x10A1);
+        if (act > 2) {
+            unsigned bw = slot * act / 100;
+            lcd_fill_rect(x0, STRIP_ACT_Y, bw ? bw : 1, STRIP_BAR_H, COL_USB);
+        }
     }
 }
 
@@ -868,6 +903,20 @@ static void strip_draw_labels(unsigned w) {
         ui_text((unsigned)lx, STRIP_LABEL_Y, label, COL_DIM, COL_STRIP, false);
         last = (unsigned)(lx + (int)tw);
         first = false;
+    }
+    /* Purpose labels for the special stretches. A 20 MHz slot is ~8 px wide, far
+     * too narrow for five characters, so only wide stretches get text; the rest
+     * keep just their bars. */
+    for (unsigned g = 0; g < gap_count(); g++) {
+        unsigned x0 = strip_x(gap_lo(g), w), x1 = strip_x(gap_hi(g), w);
+        if (x1 <= x0) continue;
+        const char *tag = gap_tag(g);
+        unsigned tw = text_w(tag);
+        if (tw + 3 > x1 - x0) continue;
+        int lx = (int)((x0 + x1) / 2) - (int)(tw / 2);
+        if (lx < 1) lx = 1;
+        if (lx + (int)tw > (int)w - 1) lx = (int)w - 1 - (int)tw;
+        ui_text((unsigned)lx, STRIP_LABEL_Y, tag, COL_PEAK, COL_STRIP, false);
     }
 }
 
@@ -895,7 +944,7 @@ static void render_strip(unsigned w) {
     if (full) {
         lcd_fill_rect(0, layout.strip_y, w, layout.strip_h, COL_STRIP);
         lcd_fill_rect(0, layout.strip_y, w, 1, COL_BG);
-        strip_draw_gaps(w);
+        strip_draw_gap_bars();
         for (unsigned i = 0; i < count; i++) strip_draw_bar(i, false);
         strip_draw_labels(w);
         strip_draw_cursor(selected, true);
@@ -916,6 +965,12 @@ static void render_strip(unsigned w) {
                 strip_cache.pk[i] != ch_pk[i])
                 strip_draw_bar(i, i == selected);
         }
+        for (unsigned g = 0; g < gap_count(); g++)
+            if (strip_cache.gdet[g] != gap_det[g] || strip_cache.gact[g] != gap_act[g] ||
+                strip_cache.gpk[g] != gap_pk[g]) {
+                strip_draw_gap_bars();
+                break;
+            }
     }
     strip_cache.valid = true;
     strip_cache.w = w;
@@ -927,6 +982,11 @@ static void render_strip(unsigned w) {
         strip_cache.det[i] = ch_det[i];
         strip_cache.act[i] = ch_act[i];
         strip_cache.pk[i] = ch_pk[i];
+    }
+    for (unsigned g = 0; g < gap_count(); g++) {
+        strip_cache.gdet[g] = gap_det[g];
+        strip_cache.gact[g] = gap_act[g];
+        strip_cache.gpk[g] = gap_pk[g];
     }
 }
 
@@ -1015,6 +1075,21 @@ static void publish_bars(void) {
         ch_pk_db[c] = (int8_t)pk_db_c;
         ch_act_db[c] = (int8_t)act;
         ch_seen |= (uint64_t)1 << c;
+    }
+    /* The stretches without a channel number use the same yardstick: peak inside
+     * the range, measured against the same floor, 12 dB up counts as detected. */
+    for (unsigned g = 0; g < gap_count(); g++) {
+        unsigned x0 = strip_x(gap_lo(g), w), x1 = strip_x(gap_hi(g), w);
+        unsigned pk = 0;
+        for (unsigned x = x0; x < x1 && x < w; x++)
+            if (band_peak[x] > pk) pk = band_peak[x];
+        int pk_db_c = (int)pk / 2 - 84;
+        int act = pk_db_c - floor_db;
+        if (act < 0) act = 0;
+        if (act >= 12) gap_hits[g]++;
+        gap_pk[g] = (uint8_t)(act > 100 ? 100 : act);
+        gap_act[g] = (uint8_t)(act > 60 ? 100 : act * 100 / 60);
+        gap_det[g] = (uint8_t)(sweeps ? 100u * gap_hits[g] / sweeps : 0);
     }
 }
 
@@ -1207,6 +1282,10 @@ static void toggle_band(void) {
     memset(ch_act_db, 0, sizeof(ch_act_db));
     memset(col_seen, 0, sizeof(col_seen));
     memset(ch_hits, 0, sizeof(ch_hits));
+    memset(gap_pk, 0, sizeof(gap_pk));
+    memset(gap_act, 0, sizeof(gap_act));
+    memset(gap_det, 0, sizeof(gap_det));
+    memset(gap_hits, 0, sizeof(gap_hits));
     if (win_peak) memset(win_peak, 0, FFT_BINS);
     sweeps = 0;
     /* Keep each mode's own limits: switching band must not undo a manual range
@@ -1269,6 +1348,10 @@ static void reset_defaults(void) {
     memset(ch_pk, 0, sizeof(ch_pk));
     memset(ch_act, 0, sizeof(ch_act));
     memset(ch_det, 0, sizeof(ch_det));
+    memset(gap_pk, 0, sizeof(gap_pk));
+    memset(gap_act, 0, sizeof(gap_act));
+    memset(gap_det, 0, sizeof(gap_det));
+    memset(gap_hits, 0, sizeof(gap_hits));
     memset(wf, 0, WF_STRIDE * WF_ROWS_MAX);
     have_data = false;
     ui_settings_clear();

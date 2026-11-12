@@ -36,10 +36,10 @@ python -m esptool --chip esp32c5 -p COM6 -b 460800 \
 
 | 文件 | 偏移 | 大小 | 说明 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` | `0x0` | 941184 | 正式版合并镜像，SPI **8 MHz** |
-| `esp32c5-lcd-app.bin` | `0x10000` | 875648 | 正式版应用 |
-| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 941184 | **4 MHz 回退镜像**，代码相同，长杜邦线上 8 MHz 出问题时用这个 |
-| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 875648 | 4 MHz 回退应用 |
+| `esp32c5-lcd-full.bin` | `0x0` | 942464 | 正式版合并镜像，SPI **8 MHz** |
+| `esp32c5-lcd-app.bin` | `0x10000` | 876928 | 正式版应用 |
+| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 942464 | **4 MHz 回退镜像**，代码相同，长杜邦线上 8 MHz 出问题时用这个 |
+| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 876928 | 4 MHz 回退应用 |
 | `esp32c5-lcd-full-diag.bin` | `0x0` | 946960 | 调试版，UART0 115200 + UI 日志，与正式版同一份代码 |
 | `esp32c5-lcd-app-diag.bin` | `0x10000` | 881424 | 调试版应用 |
 | `esp32c5-lcd-pinprobe.bin` | `0x10000` | 136736 | 引脚探针，只烧应用：碰一下排针就用蜂鸣器报出 GPIO 号 |
@@ -56,3 +56,5 @@ python -m esptool --chip esp32c5 -p COM6 -b 460800 \
 - 纵轴 dB 量程**没有自动量程**：2.4G / 5G × LIVE / SWEEP 四套独立上下限，
   写进 NVS，重启保留，只能用 B+←/→ 与 M+←/→ 组合键调整。
 - SWEEP 频谱上新增当前信道的 **20 MHz 选框**，与底栏游标对齐。
+- 5 GHz 里没有信道号的频段（RADAR / SAT / ISM）也画同样的检出率 / 活动度
+  两条，标签写成用途英文名；宽度不够放字的段只保留条。
