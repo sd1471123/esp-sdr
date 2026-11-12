@@ -36,3 +36,6 @@ Thumbs.db
 
 # Standalone panel-test project lives outside this repo
 /firmware/esp32c5-lcd-test.bin
+
+# Local probe build output
+/tmp_probe_full.bin
