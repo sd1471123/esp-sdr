@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from harness_support import assert_stubs
+
 class ReceiveCommands(unittest.TestCase):
     @unittest.skipUnless(shutil.which('cc'), 'Host C compiler unavailable')
     def test_rx_commands_and_removed_transmit_commands(self):
@@ -66,5 +68,7 @@ int main(void) {
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'commands.c';path.write_text(stub+handler+check)
             binary=Path(tmp)/'commands'
-            subprocess.run(['cc','-std=c11','-I'+str(Path(__file__).resolve().parents[1]/'main/common'),str(path),'-o',str(binary)],check=True)
+            args=['cc','-std=c11','-I'+str(Path(__file__).resolve().parents[1]/'main/common'),str(path),'-o',str(binary)]
+            assert_stubs(path.read_text(), flags=args)
+            subprocess.run(args,check=True)
             subprocess.run([str(binary)],check=True)

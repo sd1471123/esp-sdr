@@ -5,7 +5,11 @@ import subprocess
 import tempfile
 import unittest
 
+from harness_support import assert_stubs
+
 ROOT = Path(__file__).resolve().parents[1]
+# Free on every target below, so it can stand in for a status LED line.
+STATUS_LED_PIN = 2
 TARGETS = {
     'ESP32': (40, None, (1, 3), set(range(6, 12)) | {16, 17} | set(range(34, 40))),
     'ESP32C2': (21, None, (20, 19), set(range(11, 18))),
@@ -19,13 +23,8 @@ TARGETS = {
     'ESP32S31': (62, (33, 34), (58, 59), set(range(26, 33)) | {41}),
 }
 
-@unittest.skipUnless(shutil.which('cc'), 'Host C compiler unavailable')
-class GpioService(unittest.TestCase):
-    def test_gpio_service_on_all_targets(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            headers = {
-                'driver/gpio.h': '''#include <stdint.h>
+MOCK_HEADERS = {
+    'driver/gpio.h': '''#include <stdint.h>
 typedef int esp_err_t;
 #define ESP_OK 0
 #define GPIO_MODE_DISABLE 0
@@ -38,33 +37,37 @@ int gpio_config(const gpio_config_t *);
 int gpio_set_level(unsigned, unsigned);
 int gpio_set_direction(unsigned, int);
 ''',
-                'esp_check.h': '#include <assert.h>\n#define ESP_ERROR_CHECK(x) assert((x)==0)\n',
-                'esp_private/esp_gpio_reserve.h': '''#include <stdint.h>
+    'esp_check.h': '#include <assert.h>\n#define ESP_ERROR_CHECK(x) assert((x)==0)\n',
+    'esp_private/esp_gpio_reserve.h': '''#include <stdint.h>
 #include <stdbool.h>
 bool esp_gpio_is_reserved(uint64_t);
 uint64_t esp_gpio_reserve(uint64_t);
 ''',
-                'soc/usb_pins.h': '#define USBPHY_DM_NUM 19\n#define USBPHY_DP_NUM 20\n',
-            }
-            for name, text in headers.items():
-                p = tmp/name
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(text)
-            harness = tmp/'harness.c'
-            harness.write_text(r'''
+    'soc/usb_pins.h': '#define USBPHY_DM_NUM 19\n#define USBPHY_DP_NUM 20\n',
+}
+
+HARNESS = r'''
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include "burst_beep.h"
 #include "burst_gpio.h"
+#include "burst_led.h"
 #include "burst_serial.h"
 #include "driver/gpio.h"
 #include "soc/soc_caps.h"
+#ifndef BOARD_LED_PIN
+#define BOARD_LED_PIN -1
+#endif
 static uint64_t reserved = UINT64_C(1)<<5, configured;
 static unsigned levels[64], modes[64], calls, order;
 static int fail;
 static char response[512];
 bool esp_gpio_is_reserved(uint64_t mask) { return !!(reserved & mask); }
 uint64_t esp_gpio_reserve(uint64_t mask) { uint64_t old=reserved;reserved|=mask;return old; }
+/* No buzzer on this mock board; the LED line is set per subtest. */
+int burst_beep_owned_pin(void) { return -1; }
+int burst_led_owned_pin(void) { return BOARD_LED_PIN; }
 int gpio_config(const gpio_config_t *c) {
  assert(c->mode==GPIO_MODE_DISABLE && !c->pull_up_en && !c->pull_down_en && !c->intr_type);
  assert(!(configured & c->pin_bit_mask));configured|=c->pin_bit_mask;++calls;return 0;
@@ -91,6 +94,16 @@ int main(void) {
   }
   assert(burst_gpio_command("GPIO?"));
  }
+#if BOARD_LED_PIN >= 0
+ /* The status LED is driven by RMT, so GPIO control must reject its line. */
+ {
+  char cmd[32],item[16];
+  snprintf(cmd,sizeof(cmd),"GPIO %d 1",BOARD_LED_PIN);
+  assert(burst_gpio_command(cmd));assert(!strcmp(response,"ERR gpio_args\n"));
+  snprintf(item,sizeof(item)," %d:Z",BOARD_LED_PIN);
+  assert(burst_gpio_command("GPIO?"));assert(!strstr(response,item));
+ }
+#endif
  const char *bad[]={"GPIO", "GPIO 5 1", "GPIO 64 1", "GPIO 999999999999999999999 0",
   "GPIO -1 0", "GPIO -0 1", "GPIO +0 1", "GPIO 00 1", "GPIO 0 2", "GPIO 0 z", "GPIO 0 1 junk", "GPIO 0", "GPIO 0 10"};
  unsigned before=calls;
@@ -103,27 +116,65 @@ int main(void) {
  assert(burst_gpio_command("GPIO?"));assert(strstr(response," 0:1"));
  return 0;
 }
-''')
-            for target, (count, usb, uart, excluded) in TARGETS.items():
+'''
+
+
+def write_harness(tmp):
+    """Write the mock IDF headers and the C harness; return the harness path."""
+    for name, text in MOCK_HEADERS.items():
+        p = tmp/name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    harness = tmp/'harness.c'
+    harness.write_text(HARNESS)
+    return harness
+
+
+@unittest.skipUnless(shutil.which('cc'), 'Host C compiler unavailable')
+class GpioService(unittest.TestCase):
+    def test_gpio_service_on_all_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            harness = write_harness(tmp)
+            for target in TARGETS:
                 for uart_enabled in (0, 1):
                     with self.subTest(target=target, uart=uart_enabled):
-                        # Pin 5 stands for an additional IDF-owned peripheral/remapped memory pin.
-                        unavailable = excluded | {5} | set(usb or ()) | (set(uart) if uart_enabled else set())
-                        expected = sum(1 << p for p in range(count) if p not in unavailable)
-                        (tmp/'soc/soc_caps.h').write_text(f'''#define SOC_GPIO_PIN_COUNT {count}
+                        self.compile_and_run(tmp, harness, target, uart_enabled)
+
+    def test_status_led_pin_excluded_from_gpio_pool(self):
+        """A board with a status LED must keep that line out of GPIO control."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            harness = write_harness(tmp)
+            for target in ('ESP32', 'ESP32C5', 'ESP32S3'):
+                with self.subTest(target=target, led_pin=STATUS_LED_PIN):
+                    self.compile_and_run(tmp, harness, target, 0, led_pin=STATUS_LED_PIN)
+
+    def compile_and_run(self, tmp, harness, target, uart_enabled, led_pin=-1):
+        count, usb, uart, excluded = TARGETS[target]
+        # Pin 5 stands for an additional IDF-owned peripheral/remapped memory pin.
+        unavailable = excluded | {5} | set(usb or ()) | (set(uart) if uart_enabled else set())
+        if led_pin >= 0:
+            # The LED line is owned by RMT and must never reach the GPIO pool.
+            unavailable |= {led_pin}
+        expected = sum(1 << p for p in range(count) if p not in unavailable)
+        (tmp/'soc/soc_caps.h').write_text(f'''#define SOC_GPIO_PIN_COUNT {count}
 #define SOC_GPIO_VALID_OUTPUT_GPIO_MASK ((UINT64_C(1)<<{count})-1)
 #define SOC_USB_SERIAL_JTAG_SUPPORTED {int(usb is not None and target != 'ESP32S2')}
 ''')
-                        (tmp/'soc/io_mux_reg.h').write_text('' if usb is None else f'#define USB_INT_PHY0_DM_GPIO_NUM {usb[0]}\n#define USB_INT_PHY0_DP_GPIO_NUM {usb[1]}\n')
-                        # Mimic silicon holes/input-only pins separately from the service's memory exclusions.
-                        invalid = {p for p in excluded if (target=='ESP32' and p>=34) or (target=='ESP32S2' and p==46) or (target=='ESP32S3' and p in range(22,26)) or (target=='ESP32S31' and p==41)}
-                        with (tmp/'soc/soc_caps.h').open('a') as f:
-                            if invalid:
-                                f.write(f'#undef SOC_GPIO_VALID_OUTPUT_GPIO_MASK\n#define SOC_GPIO_VALID_OUTPUT_GPIO_MASK {sum(1 << p for p in range(count) if p not in invalid)}ULL\n')
-                        binary = tmp/'gpio-test'
-                        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-fsanitize=undefined',
-                            f'-DCONFIG_IDF_TARGET_{target}=1', f'-DCONFIG_ESP_SDR_UART_ENABLED={uart_enabled}',
-                            f'-DCONFIG_ESP_SDR_UART_TX_PIN={uart[0]}', f'-DCONFIG_ESP_SDR_UART_RX_PIN={uart[1]}',
-                            f'-DEXPECTED_MASK={expected}ULL', '-I'+str(tmp), '-I'+str(ROOT/'main/common'),
-                            str(ROOT/'main/common/burst_gpio.c'), str(harness), '-o', str(binary)], check=True)
-                        subprocess.run([str(binary)], check=True)
+        (tmp/'soc/io_mux_reg.h').write_text('' if usb is None else f'#define USB_INT_PHY0_DM_GPIO_NUM {usb[0]}\n#define USB_INT_PHY0_DP_GPIO_NUM {usb[1]}\n')
+        # Mimic silicon holes/input-only pins separately from the service's memory exclusions.
+        invalid = {p for p in excluded if (target=='ESP32' and p>=34) or (target=='ESP32S2' and p==46) or (target=='ESP32S3' and p in range(22,26)) or (target=='ESP32S31' and p==41)}
+        with (tmp/'soc/soc_caps.h').open('a') as f:
+            if invalid:
+                f.write(f'#undef SOC_GPIO_VALID_OUTPUT_GPIO_MASK\n#define SOC_GPIO_VALID_OUTPUT_GPIO_MASK {sum(1 << p for p in range(count) if p not in invalid)}ULL\n')
+        binary = tmp/'gpio-test'
+        args = ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-fsanitize=undefined',
+            f'-DCONFIG_IDF_TARGET_{target}=1', f'-DCONFIG_ESP_SDR_UART_ENABLED={uart_enabled}',
+            f'-DCONFIG_ESP_SDR_UART_TX_PIN={uart[0]}', f'-DCONFIG_ESP_SDR_UART_RX_PIN={uart[1]}',
+            f'-DBOARD_LED_PIN={led_pin}',
+            f'-DEXPECTED_MASK={expected}ULL', '-I'+str(tmp), '-I'+str(ROOT/'main/common'),
+            str(ROOT/'main/common/burst_gpio.c'), str(harness), '-o', str(binary)]
+        assert_stubs(harness.read_text(), (ROOT/'main/common/burst_gpio.c').read_text(), flags=args)
+        subprocess.run(args, check=True)
+        subprocess.run([str(binary)], check=True)

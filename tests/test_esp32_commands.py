@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from harness_support import assert_stubs
+
 class ESP32Commands(unittest.TestCase):
     @unittest.skipUnless(shutil.which('cc'), 'Host C compiler unavailable')
     def test_protocol(self):
@@ -106,5 +108,7 @@ int main(void){
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp);(p/'check.c').write_text(stub+handler+checks)
             (p/'esp_rom_crc.h').write_text('static uint32_t esp_rom_crc32_le(uint32_t c,const uint8_t *d,size_t n){return c;}\n')
-            subprocess.run(['cc','-std=c11','-I'+tmp,'-I'+str(Path(__file__).resolve().parents[1]/'main/common'),str(p/'check.c'),'-o',str(p/'check')],check=True)
+            args=['cc','-std=c11','-I'+tmp,'-I'+str(Path(__file__).resolve().parents[1]/'main/common'),str(p/'check.c'),'-o',str(p/'check')]
+            assert_stubs((p/'check.c').read_text(),flags=args)
+            subprocess.run(args,check=True)
             subprocess.run([str(p/'check')],check=True)

@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from harness_support import assert_stubs
+
 class C6Commands(unittest.TestCase):
     @unittest.skipUnless(shutil.which('cc'), 'Host C compiler unavailable')
     def test_c6(self):
@@ -43,6 +45,8 @@ static void reply(const char *s) { snprintf(response,sizeof(response),"%s",s); }
 static bool gain_command(const char *s) { return false; }
 static bool burst_version_command(const char *s) { return false; }
 static bool burst_gpio_command(const char *s) { return false; }
+static bool burst_led_command(const char *s) { return false; }
+static bool burst_beep_command(const char *s) { return false; }
 static bool limits_command(const char *s) { return false; }
 static bool capture(unsigned n,unsigned d,unsigned f) { ++captures;last_samples=n;last_format=f;return true; }
 static void vTaskDelay(int ticks) {}
@@ -104,5 +108,7 @@ int main(void) {
             path=Path(tmp)/'commands.c';path.write_text(stub+handler+check)
             for c61 in [0]:
                 binary=Path(tmp)/f'commands-{c61}'
-                subprocess.run(['cc','-std=c11','-DCONFIG_IDF_TARGET_ESP32C6=1','-I'+str(Path(__file__).resolve().parents[1]/'main/common'),f'-DCONFIG_IDF_TARGET_ESP32C61={c61}','-DCONFIG_IDF_TARGET_ESP32C5=0',str(path),'-o',str(binary)],check=True)
+                args=['cc','-std=c11','-DCONFIG_IDF_TARGET_ESP32C6=1','-I'+str(Path(__file__).resolve().parents[1]/'main/common'),f'-DCONFIG_IDF_TARGET_ESP32C61={c61}','-DCONFIG_IDF_TARGET_ESP32C5=0',str(path),'-o',str(binary)]
+                assert_stubs(path.read_text(),flags=args)
+                subprocess.run(args,check=True)
                 subprocess.run([str(binary)],check=True)

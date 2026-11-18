@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from harness_support import assert_stubs
+
 class SharedCommands(unittest.TestCase):
     @unittest.skipUnless(shutil.which('cc'), 'Host C compiler unavailable')
     def test_both_chips(self):
@@ -18,6 +20,8 @@ void rx_recalibrate(unsigned mhz) {}
 #include <stdbool.h>
 static bool burst_version_command(const char *s) { return false; }
 static bool burst_gpio_command(const char *s) { return false; }
+static bool burst_led_command(const char *s) { return false; }
+static bool burst_beep_command(const char *s) { return false; }
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -140,5 +144,7 @@ int main(void) {
             path=Path(tmp)/'commands.c';path.write_text(stub+handler+check)
             for c61 in [0,1]:
                 binary=Path(tmp)/f'commands-{c61}'
-                subprocess.run(['cc','-std=c11','-DCONFIG_IDF_TARGET_ESP32C6=0','-I'+str(Path(__file__).resolve().parents[1]/'main/targets/esp32c61'),'-I'+str(Path(__file__).resolve().parents[1]/'main/common'),f'-DCONFIG_IDF_TARGET_ESP32C61={c61}',f'-DCONFIG_IDF_TARGET_ESP32C5={1-c61}',str(path),'-o',str(binary)],check=True)
+                args=['cc','-std=c11','-DCONFIG_IDF_TARGET_ESP32C6=0','-I'+str(Path(__file__).resolve().parents[1]/'main/targets/esp32c61'),'-I'+str(Path(__file__).resolve().parents[1]/'main/common'),f'-DCONFIG_IDF_TARGET_ESP32C61={c61}',f'-DCONFIG_IDF_TARGET_ESP32C5={1-c61}',str(path),'-o',str(binary)]
+                assert_stubs(path.read_text(),flags=args)
+                subprocess.run(args,check=True)
                 subprocess.run([str(binary)],check=True)

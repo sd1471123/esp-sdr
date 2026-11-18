@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from harness_support import assert_stubs
+
 
 class C3Commands(unittest.TestCase):
     @unittest.skipUnless(shutil.which('cc'), 'Host C compiler unavailable')
@@ -99,5 +101,7 @@ int main(void) {
             path = Path(tmp) / 'commands.c'
             path.write_text(stub + frequency + handler + checks)
             binary = Path(tmp) / 'commands'
-            subprocess.run(['cc', '-std=c11', '-I'+str(root/'main/common'), str(path), '-o', str(binary)], check=True)
+            args = ['cc', '-std=c11', '-I'+str(root/'main/common'), str(path), '-o', str(binary)]
+            assert_stubs(path.read_text(), flags=args)
+            subprocess.run(args, check=True)
             subprocess.run([str(binary)], check=True)
