@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: firmware-${{ github.workflow }}-${{ github.ref }}
@@ -80,7 +81,36 @@ jobs:
           path: |
             build-${{ matrix.id }}/log/
             build-${{ matrix.id }}/sdkconfig
+            build-${{ matrix.id }}/esp_sdr.map
           retention-days: 7
+      - name: Publish linker report
+        if: failure() && matrix.id == 'esp32c5'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source .esp-idf/export.sh >/dev/null 2>&1 || true
+          map=build-esp32c5/esp_sdr.map
+          {
+            echo "Failed run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo 'Guard boundary: `_iram_end/_data_end/_bss_end <= 0x40820000`'
+            echo
+            echo '## map tail'
+            echo '```'
+            tail -c 4000 "$map" 2>/dev/null || echo 'map file missing'
+            echo '```'
+            echo
+            echo '## largest bss objects in libmain.a'
+            echo '```'
+            riscv32-esp-elf-nm --size-sort -S -t d --defined-only \
+              build-esp32c5/esp-idf/main/libmain.a 2>/dev/null |
+              grep -E ' [bB] ' | tail -30 || echo 'nm unavailable'
+            echo '```'
+          } > "$RUNNER_TEMP/report.md"
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "C5 linker diagnostics (run $GITHUB_RUN_ID)" \
+            --body-file "$RUNNER_TEMP/report.md"
 
   bundle:
     needs: build
