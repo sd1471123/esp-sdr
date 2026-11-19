@@ -2,8 +2,9 @@ name: Publish LCD release
 
 # Publishing the panel firmware goes through GitHub Actions so that no local
 # credential is ever needed: the job uses the repository's own token.
-# Push a c5-lcd-* tag to publish; every older release is removed first so the
-# branch only ever advertises the newest image.
+# Push a c5-lcd-* tag to publish. Older releases are kept so users can always
+# roll back to a previous image; only the release for the tag being published
+# is refreshed (so a re-run is idempotent).
 
 on:
   push:
@@ -18,10 +19,8 @@ on:
 permissions:
   contents: write
 
-# One publisher at a time. Pushing two tags together otherwise starts two runs
-# at once: both list the releases before either has created one, so neither
-# deletes the other and the branch ends up advertising two "latest" images.
-# Queued rather than cancelled, so the newest tag still wins in push order.
+# One publisher at a time so two concurrent runs cannot race to create/refresh
+# the same tag. Queued rather than cancelled, so tags publish in push order.
 concurrency:
   group: publish-lcd-release
   cancel-in-progress: false
@@ -33,22 +32,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - name: Drop the previous releases
+      - name: Refresh only this tag's release (keep older ones for rollback)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          KEEP: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          gh release list --limit 100 --json tagName \
-            | jq -r '.[].tagName' \
-            | while read -r tag; do
-                if [ "$tag" = "$KEEP" ]; then
-                  echo "keeping $tag"
-                  continue
-                fi
-                echo "deleting release $tag"
-                gh release delete "$tag" --yes --cleanup-tag || true
-              done
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "refreshing existing release $TAG (older releases are kept)"
+            gh release delete "$TAG" --yes --cleanup-tag
+          else
+            echo "no existing release for $TAG; will create"
+          fi
       - name: Publish the images
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

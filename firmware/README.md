@@ -7,7 +7,8 @@
 按 R 可切回竖屏 240×320。主界面为深色：顶栏（频段 / 模式 / 电平）、频谱 +
 峰值保持、瀑布、底部信道条。
 
-构建时间：2026-11-10，ESP-IDF v6.1，target `esp32c5`。
+构建时间：2026-11-19，ESP-IDF v6.1，target `esp32c5`。本次重建纳入了 C5 adctrig
+采集时钟修复（省去每次访问 BT 块约 0.8 ms 的总线超时）。
 
 ## 三套固件，先选一套
 
@@ -31,12 +32,12 @@
 
 | 文件 | 偏移 | 大小 | 说明 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` | `0x0` | 943424 | **正式版**合并镜像（8 MHz），一次烧完 |
-| `esp32c5-lcd-app.bin` | `0x10000` | 877888 | 正式版应用（占 1 MB 分区 84%） |
-| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 943424 | 4 MHz 回退合并镜像 |
-| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 877888 | 4 MHz 回退应用 |
-| `esp32c5-lcd-full-diag.bin` | `0x0` | 946960 | 诊断版合并镜像（115200 + UI 日志） |
-| `esp32c5-lcd-app-diag.bin` | `0x10000` | 881424 | 诊断版应用 |
+| `esp32c5-lcd-full.bin` | `0x0` | 943456 | **正式版**合并镜像（8 MHz），一次烧完 |
+| `esp32c5-lcd-app.bin` | `0x10000` | 877920 | 正式版应用（占 1 MB 分区 84%） |
+| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 943472 | 4 MHz 回退合并镜像 |
+| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 877936 | 4 MHz 回退应用 |
+| `esp32c5-lcd-full-diag.bin` | `0x0` | 945456 | 诊断版合并镜像（115200 + UI 日志） |
+| `esp32c5-lcd-app-diag.bin` | `0x10000` | 879920 | 诊断版应用 |
 | `esp32c5-lcd-pinprobe.bin` | `0x10000` | 136736 | 引脚探针，只烧应用，见下 |
 | `esp32c5-lcd-bootloader.bin` | `0x2000` | 22160 | 二级引导 |
 | `esp32c5-lcd-partition-table.bin` | `0x8000` | 3072 | 分区表 |
