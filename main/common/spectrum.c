@@ -7,7 +7,11 @@
 #include "spectrum_fft.h"
 #include "spectrum_stats.h"
 #include "esp_cpu.h"
+#if CONFIG_IDF_TARGET_ESP32C5
+/* Only the C5 twiddle table is heap-allocated; keep this IDF-only header out
+ * of host-side unit tests, which compile this file for C3/C61 without IDF. */
 #include "esp_heap_caps.h"
+#endif
 #include "burst_serial.h"
 #include "dsps_fft2r.h"
 #include "esp_rom_crc.h"
