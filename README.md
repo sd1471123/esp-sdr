@@ -14,12 +14,35 @@
 | 部件 | 型号 | 备注 |
 |---|---|---|
 | 主控 | ESP32-C5-DevKitC-1（ESP32-C5HR8 rev v1.2） | 16 MB flash / 8 MB PSRAM / 48 MHz 晶振 |
-| 屏幕 | 3.2" 240×320 SPI，**ST7789**（GMT032-8P-SPI） | 8 针：GND VCC SCL SDI RESET AO CS BL |
+| 屏幕 | 3.2" 240×320 SPI **TFT**，**ST7789**（GMT032-8P-SPI） | 8 针：GND VCC SCL SDI RESET AO CS BL |
 | 按键 | 5 个轻触 / 微动 | 对地、内部上拉、低电平有效 |
 | 蜂鸣器 | 有源蜂鸣器 | 经 NPN（S8050）驱动，基极串 1 kΩ |
 
+> ✅ **已验证**：本分支固件已在 **ESP32-C5-DevKitC-1 + 3.2 英寸 8 针 SPI 接口 TFT 屏
+> （ST7789 / GMT032-8P-SPI）** 这套组合上实机跑通——屏幕显示、5 个按键、蜂鸣器、
+> PWM 背光调光、以及上位机 USB / UART 协议均正常工作。下面[接线](#接线)一节的引脚
+> 就是实测通过的那一套。
+
 屏幕面板原生 240×320，固件默认横屏使用（MADCTL `0x60`，坐标空间 320×240），
 按 R 可切回竖屏。
+
+### 屏幕接口（8 针 SPI）
+
+面板排针顺序固定为 `GND VCC SCL SDI RESET AO CS BL`，与常见的 3.2 英寸
+ST7789 / ILI9341 模块一致：
+
+| 针脚 | 信号 | 方向 | 作用 |
+|---|---|---|---|
+| `GND` | 地 | — | 电源地 |
+| `VCC` | 3V3 | 电源 | 逻辑与背光供电（3.3 V） |
+| `SCL` | SCK | 输入 | SPI 时钟，固件默认 8 MHz（可回退 4 MHz） |
+| `SDI` | MOSI | 输入 | SPI 数据，单向写，无 MISO |
+| `RESET` | RST | 输入 | 面板复位，低电平有效 |
+| `AO` | DC | 输入 | 命令 / 数据选择（即 A0 / DC） |
+| `CS` | CS | 输入 | 片选，低电平有效 |
+| `BL` | 背光 | 输入 | 背光使能；**不要直连 GPIO**，见下方电流警告 |
+
+每个针脚接到 ESP32-C5 的哪个 GPIO，见下面的[接线](#接线)一节。
 
 ## 功能
 
@@ -171,12 +194,12 @@ GPIO13/14 是 USB D-/D+，GPIO11/12 是 UART0 控制台，都不要拿来接屏�
 
 | 文件 | 偏移 | 大小 | 说明 |
 |---|---|---|---|
-| `esp32c5-lcd-full.bin` | `0x0` | 943424 | **整片镜像**（SPI 8 MHz），首次烧写用；**会清空 NVS 设置** |
-| `esp32c5-lcd-app.bin` | `0x10000` | 877888 | 应用镜像，日常更新用这个（保留设置） |
-| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 943424 | 4 MHz 回退镜像，代码相同只是时钟更低 |
-| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 877888 | 4 MHz 回退应用 |
-| `esp32c5-lcd-full-diag.bin` | `0x0` | 946960 | 调试版（115200 + UI 日志），与正式版同一份代码 |
-| `esp32c5-lcd-app-diag.bin` | `0x10000` | 881424 | 调试版应用 |
+| `esp32c5-lcd-full.bin` | `0x0` | 943456 | **整片镜像**（SPI 8 MHz），首次烧写用；**会清空 NVS 设置** |
+| `esp32c5-lcd-app.bin` | `0x10000` | 877920 | 应用镜像，日常更新用这个（保留设置） |
+| `esp32c5-lcd-full-4mhz.bin` | `0x0` | 943472 | 4 MHz 回退镜像，代码相同只是时钟更低 |
+| `esp32c5-lcd-app-4mhz.bin` | `0x10000` | 877936 | 4 MHz 回退应用 |
+| `esp32c5-lcd-full-diag.bin` | `0x0` | 945456 | 调试版（115200 + UI 日志），与正式版同一份代码 |
+| `esp32c5-lcd-app-diag.bin` | `0x10000` | 879920 | 调试版应用 |
 | `esp32c5-lcd-pinprobe.bin` | `0x10000` | 136736 | 引脚探针：碰一下针脚就用蜂鸣器报出 GPIO 号 |
 
 Flash 2 MB，DIO，80 MHz。`full` 镜像由 `merge_full.py` 把三段按偏移拼成单文件。
@@ -246,7 +269,7 @@ python merge_full.py
 ## 与上游的关系
 
 本仓库是 [ESPARGOS/esp-sdr](https://github.com/ESPARGOS/esp-sdr) 的分支，
-`lcd` 分支只做 ESP32-C5 + ST7789 本地面板这一件事。上游的多芯片支持、
+`tft` 分支只做 ESP32-C5 + ST7789 本地面板这一件事。上游的多芯片支持、
 上位机协议与浏览器 SDR 视图见上游文档：`docs/protocol.md`、
 `docs/spectrum.md`、`docs/rx-controls.md`、`docs/iq-stream.md`。
 
