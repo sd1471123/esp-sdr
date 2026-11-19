@@ -7,6 +7,7 @@
 #include "spectrum_fft.h"
 #include "spectrum_stats.h"
 #include "esp_cpu.h"
+#include "esp_heap_caps.h"
 #include "burst_serial.h"
 #include "dsps_fft2r.h"
 #include "esp_rom_crc.h"
@@ -42,9 +43,28 @@ spectrum_workspace_t spectrum_workspace(void) {
     return (spectrum_workspace_t){fft_data, window, powers.mean, frame};
 }
 
+#if CONFIG_IDF_TARGET_ESP32C5
+/* C5 RF dump owns the 0x40820000 bank; that range is registered with the heap
+ * allocator via SOC_RESERVE_MEMORY_REGION, so heap allocations never land there.
+ * Keeping the 4 KiB twiddle table in BSS pushes _bss_end past the sram_guard
+ * boundary. Allocate it lazily instead. The FFT reads this table only between
+ * captures (never while adctrig owns the bank), so heap placement is safe.
+ * Same pattern as ring_capture.c on S3. */
+static int16_t *twiddles;
+#else
 static int16_t twiddles[MAX_FFT] __attribute__((aligned(16))) SPEC_STORAGE;
+#endif
 bool spectrum_fft_init(void) {
+#if CONFIG_IDF_TARGET_ESP32C5
+    if (!ready) {
+        if (!twiddles)
+            twiddles = heap_caps_aligned_alloc(16, MAX_FFT * sizeof(int16_t),
+                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        ready = twiddles && dsps_fft2r_init_sc16(twiddles, MAX_FFT) == ESP_OK;
+    }
+#else
     if (!ready) ready = dsps_fft2r_init_sc16(twiddles, MAX_FFT) == ESP_OK;
+#endif
     return ready;
 }
 
