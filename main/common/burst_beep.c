@@ -1,18 +1,26 @@
 #include "burst_beep.h"
 #include "burst_serial.h"
+#include "sdkconfig.h"
 #include <stdio.h>
 #include <string.h>
 #include "driver/gpio.h"
+#include "esp_log.h"
+#include "soc/soc_caps.h"
+
+/* RMT is not available on every target (e.g. ESP32-C2 and ESP32-C61 have no
+ * RMT peripheral at all, so their soc layer defines neither RMT clock sources
+ * nor the driver).  Keep the command interface stable but degrade gracefully
+ * to "unsupported" on those chips instead of failing to compile. */
+#if SOC_RMT_SUPPORTED
+
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
-#include "esp_log.h"
 
 #define BEEP_RESOLUTION_HZ 1000000u /* 1 us per tick */
 #define BEEP_MIN_HZ 100
 #define BEEP_MAX_HZ 20000
 #define BEEP_MAX_PIN 48
 
-static const char *TAG = "burst_beep";
 static rmt_channel_handle_t beep_channel;
 static rmt_encoder_handle_t beep_encoder;
 static int beep_pin = -1;
@@ -35,17 +43,6 @@ static void beep_stop(void) {
     beep_duty = 0;
 }
 
-void burst_beep_init(void) {
-    const rmt_copy_encoder_config_t encoder_config; /* empty by design */
-    if (rmt_new_copy_encoder(&encoder_config, &beep_encoder) != ESP_OK) {
-        ESP_LOGW(TAG, "no encoder for the buzzer");
-        beep_encoder = NULL;
-    }
-    beep_pin = -1;
-    beep_freq = 0;
-    beep_duty = 0;
-}
-
 /* One symbol carries both phases of a period and is looped forever by the RMT
  * hardware, so the tone keeps playing without any CPU time. */
 static bool beep_start(int pin, unsigned freq, unsigned duty) {
@@ -62,7 +59,7 @@ static bool beep_start(int pin, unsigned freq, unsigned duty) {
             .flags.with_dma = false,
         };
         if (rmt_new_tx_channel(&channel_config, &beep_channel) != ESP_OK) {
-            ESP_LOGW(TAG, "no RMT channel for the buzzer");
+            ESP_LOGW("burst_beep", "no RMT channel for the buzzer");
             beep_channel = NULL;
             return false;
         }
@@ -89,6 +86,17 @@ static bool beep_start(int pin, unsigned freq, unsigned duty) {
     beep_freq = freq;
     beep_duty = duty;
     return true;
+}
+
+void burst_beep_init(void) {
+    const rmt_copy_encoder_config_t encoder_config; /* empty by design */
+    if (rmt_new_copy_encoder(&encoder_config, &beep_encoder) != ESP_OK) {
+        ESP_LOGW("burst_beep", "no encoder for the buzzer");
+        beep_encoder = NULL;
+    }
+    beep_pin = -1;
+    beep_freq = 0;
+    beep_duty = 0;
 }
 
 int burst_beep_owned_pin(void) {
@@ -139,3 +147,33 @@ bool burst_beep_command(const char *line) {
     reply("ERR beep_args\n");
     return true;
 }
+
+#else /* !SOC_RMT_SUPPORTED */
+
+/* No RMT peripheral on this target: keep the command interface responsive but
+ * report the feature as unavailable.  owned_pin() always returns -1 so the
+ * GPIO pool never reserves a pin for a buzzer that cannot be driven. */
+static void reply(const char *s) {
+    burst_serial_send(s, strlen(s));
+}
+
+void burst_beep_init(void) {}
+
+int burst_beep_owned_pin(void) {
+    return -1;
+}
+
+void burst_beep_silence(void) {}
+
+bool burst_beep_command(const char *line) {
+    if (!strcmp(line, "BEEP?")) {
+        reply("BEEP 0\n");
+    } else if (!strcmp(line, "BEEP") || !strncmp(line, "BEEP ", 5)) {
+        reply("ERR beep_unsupported\n");
+    } else {
+        return false;
+    }
+    return true;
+}
+
+#endif /* SOC_RMT_SUPPORTED */
